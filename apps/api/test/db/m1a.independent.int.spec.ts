@@ -338,72 +338,122 @@ describe('M1-A independent verification', () => {
     const port = harness.container.getMappedPort(5432);
     await harness.adminPool.query(`CREATE DATABASE ${scratchDatabase} OWNER clinic_migrator`);
     const scratchUrl = `postgresql://clinic_migrator:${migratorPassword}@${host}:${port}/${scratchDatabase}`;
+    let pool: Pool | undefined;
+    let testError: unknown;
+    let testFailed = false;
+    const cleanupErrors: unknown[] = [];
 
     try {
       await runMigrations(scratchUrl, 'up', migrationsDirectory);
-      const pool = new Pool({ connectionString: scratchUrl, max: 1 });
-      try {
-        const applied = await pool.query<{ name: string }>(
-          `SELECT name FROM clinik_meta.schema_migrations ORDER BY name`,
-        );
-        expect(applied.rows.map((row) => row.name)).toEqual([
-          '0001_foundations',
-          '0002_m1a_identity_tenancy',
-        ]);
+      pool = new Pool({ connectionString: scratchUrl, max: 1 });
+      const applied = await pool.query<{ name: string }>(
+        `SELECT name FROM clinik_meta.schema_migrations ORDER BY name`,
+      );
+      expect(applied.rows.map((row) => row.name)).toEqual([
+        '0001_foundations',
+        '0002_m1a_identity_tenancy',
+      ]);
 
-        const tables = await pool.query<{ tablename: string }>(
-          `SELECT tablename FROM pg_tables
+      const tables = await pool.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables
               WHERE schemaname = 'public' AND tablename = ANY($1) ORDER BY tablename`,
-          [m1aTables],
-        );
-        expect(tables.rows.map((row) => row.tablename)).toEqual([...m1aTables].sort());
+        [m1aTables],
+      );
+      expect(tables.rows.map((row) => row.tablename)).toEqual([...m1aTables].sort());
 
-        await runMigrations(scratchUrl, 'down', migrationsDirectory);
-        const afterOneDown = await pool.query<{ name: string }>(
-          `SELECT name FROM clinik_meta.schema_migrations ORDER BY name`,
-        );
-        expect(afterOneDown.rows.map((row) => row.name)).toEqual(['0001_foundations']);
-        const m1aAfterDown = await pool.query<{ count: number }>(
-          `SELECT count(*)::int AS count FROM pg_tables
+      await runMigrations(scratchUrl, 'down', migrationsDirectory);
+      const afterOneDown = await pool.query<{ name: string }>(
+        `SELECT name FROM clinik_meta.schema_migrations ORDER BY name`,
+      );
+      expect(afterOneDown.rows.map((row) => row.name)).toEqual(['0001_foundations']);
+      const m1aAfterDown = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM pg_tables
               WHERE schemaname = 'public' AND tablename = ANY($1)`,
-          [m1aTables],
-        );
-        expect(m1aAfterDown.rows[0]?.count).toBe(0);
-        const helpers = await pool.query<{ count: number }>(
-          `SELECT count(*)::int AS count FROM pg_proc
+        [m1aTables],
+      );
+      expect(m1aAfterDown.rows[0]?.count).toBe(0);
+      const helpers = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM pg_proc
               WHERE proname IN ('app_current_org', 'app_current_user', 'set_updated_at')`,
-        );
-        expect(helpers.rows[0]?.count).toBe(3);
+      );
+      expect(helpers.rows[0]?.count).toBe(3);
 
-        await runMigrations(scratchUrl, 'up', migrationsDirectory);
-        const reapplied = await pool.query<{ count: number }>(
-          `SELECT count(*)::int AS count FROM pg_tables
+      await runMigrations(scratchUrl, 'up', migrationsDirectory);
+      const reapplied = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM pg_tables
               WHERE schemaname = 'public' AND tablename = ANY($1)`,
-          [m1aTables],
-        );
-        expect(reapplied.rows[0]?.count).toBe(m1aTables.length);
+        [m1aTables],
+      );
+      expect(reapplied.rows[0]?.count).toBe(m1aTables.length);
 
-        await runMigrations(scratchUrl, 'down', migrationsDirectory);
-        await runMigrations(scratchUrl, 'down', migrationsDirectory);
-        const empty = await pool.query<{ table: string | null; function: string | null }>(
-          `SELECT to_regclass('public.users')::text AS table,
+      await runMigrations(scratchUrl, 'down', migrationsDirectory);
+      await runMigrations(scratchUrl, 'down', migrationsDirectory);
+      const empty = await pool.query<{ table: string | null; function: string | null }>(
+        `SELECT to_regclass('public.users')::text AS table,
                     to_regproc('public.app_current_org')::text AS function`,
-        );
-        expect(empty.rows[0]).toEqual({ table: null, function: null });
+      );
+      expect(empty.rows[0]).toEqual({ table: null, function: null });
 
-        await runMigrations(scratchUrl, 'up', migrationsDirectory);
-        const final = await pool.query<{ count: number }>(
-          `SELECT count(*)::int AS count FROM pg_tables
+      await runMigrations(scratchUrl, 'up', migrationsDirectory);
+      const final = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM pg_tables
               WHERE schemaname = 'public' AND tablename = ANY($1)`,
-          [m1aTables],
-        );
-        expect(final.rows[0]?.count).toBe(m1aTables.length);
-      } finally {
-        await pool.end();
-      }
+        [m1aTables],
+      );
+      expect(final.rows[0]?.count).toBe(m1aTables.length);
+    } catch (error) {
+      testFailed = true;
+      testError = error;
     } finally {
-      await harness.adminPool.query(`DROP DATABASE IF EXISTS ${scratchDatabase} WITH (FORCE)`);
+      let scratchPoolClosed = pool === undefined;
+      if (pool) {
+        try {
+          await pool.end();
+          scratchPoolClosed = true;
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      if (scratchPoolClosed) {
+        try {
+          const activeConnections = await harness.adminPool.query<{
+            pid: number;
+            usename: string;
+            application_name: string;
+            state: string | null;
+          }>(
+            `SELECT pid, usename, application_name, state
+               FROM pg_stat_activity
+              WHERE datname = $1 AND pid <> pg_backend_pid()`,
+            [scratchDatabase],
+          );
+          if (activeConnections.rows.length > 0) {
+            const connections = activeConnections.rows
+              .map(
+                ({ pid, usename, application_name, state }) =>
+                  `${pid}:${usename}/${application_name}/${state ?? 'unknown'}`,
+              )
+              .join(', ');
+            cleanupErrors.push(
+              new Error(
+                `Scratch database still has ${activeConnections.rows.length} open connection(s): ${connections}`,
+              ),
+            );
+          } else {
+            await harness.adminPool.query(`DROP DATABASE IF EXISTS ${scratchDatabase}`);
+          }
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
     }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        testFailed ? [testError, ...cleanupErrors] : cleanupErrors,
+        'Scratch database cleanup failed.',
+      );
+    }
+    if (testFailed) throw testError;
   }, 120_000);
 
   it('matches the approved column and NOT NULL inventory exactly', async () => {

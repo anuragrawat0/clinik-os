@@ -24,6 +24,27 @@ export interface DatabaseHarness {
   stop(): Promise<void>;
 }
 
+async function stopDatabaseResources(
+  container: StartedPostgreSqlContainer,
+  pools: readonly Pool[],
+): Promise<void> {
+  const errors: unknown[] = [];
+  const poolResults = await Promise.allSettled(pools.map((pool) => pool.end()));
+  for (const result of poolResults) {
+    if (result.status === 'rejected') errors.push(result.reason);
+  }
+
+  try {
+    await container.stop();
+  } catch (error) {
+    errors.push(error);
+  }
+
+  if (errors.length > 0) {
+    throw new AggregateError(errors, 'Failed to cleanly stop the PostgreSQL test harness.');
+  }
+}
+
 function rolePassword(role: 'clinic_migrator' | 'clinic_app' | 'clinic_worker'): string {
   if (role === 'clinic_migrator') return migratorPassword;
   if (role === 'clinic_app') return appPassword;
@@ -71,6 +92,7 @@ export async function startDatabaseHarness(): Promise<DatabaseHarness> {
     max: 2,
     application_name: 'clinik-test-migrator',
   });
+  const pools: Pool[] = [adminPool, migratorPool];
 
   try {
     await runMigrations(connectionString('clinic_migrator'), 'up', migrationsDirectory);
@@ -86,51 +108,53 @@ export async function startDatabaseHarness(): Promise<DatabaseHarness> {
       GRANT SELECT, INSERT, UPDATE ON ${tenantRows} TO clinic_worker;
       GRANT SELECT, INSERT, UPDATE, DELETE ON ${tenantRows} TO clinic_app;
     `);
+
+    const appPool = new Pool({
+      connectionString: connectionString('clinic_app'),
+      max: 2,
+      application_name: 'clinik-test-app',
+    });
+    pools.push(appPool);
+    const workerPool = new Pool({
+      connectionString: connectionString('clinic_worker'),
+      max: 2,
+      application_name: 'clinik-test-worker',
+    });
+    pools.push(workerPool);
+
+    async function resetTenantRows(): Promise<void> {
+      await adminPool.query(`TRUNCATE ${tenantRows}`);
+      await adminPool.query(
+        `INSERT INTO ${tenantRows} (id, organization_id) VALUES (1, $1), (2, $2)`,
+        [organizationA, organizationB],
+      );
+    }
+
+    async function stop(): Promise<void> {
+      await stopDatabaseResources(container, pools);
+    }
+
+    await resetTenantRows();
+
+    return {
+      container,
+      adminPool,
+      migratorPool,
+      appPool,
+      workerPool,
+      connectionString,
+      resetTenantRows,
+      stop,
+    };
   } catch (error) {
-    await Promise.all([adminPool.end(), migratorPool.end()]);
-    await container.stop();
+    try {
+      await stopDatabaseResources(container, pools);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        'Database harness setup failed and cleanup also reported errors.',
+      );
+    }
     throw error;
   }
-
-  const appPool = new Pool({
-    connectionString: connectionString('clinic_app'),
-    max: 2,
-    application_name: 'clinik-test-app',
-  });
-  const workerPool = new Pool({
-    connectionString: connectionString('clinic_worker'),
-    max: 2,
-    application_name: 'clinik-test-worker',
-  });
-
-  async function resetTenantRows(): Promise<void> {
-    await adminPool.query(`TRUNCATE ${tenantRows}`);
-    await adminPool.query(
-      `INSERT INTO ${tenantRows} (id, organization_id) VALUES (1, $1), (2, $2)`,
-      [organizationA, organizationB],
-    );
-  }
-
-  await resetTenantRows();
-
-  async function stop(): Promise<void> {
-    await Promise.allSettled([
-      appPool.end(),
-      workerPool.end(),
-      migratorPool.end(),
-      adminPool.end(),
-    ]);
-    await container.stop();
-  }
-
-  return {
-    container,
-    adminPool,
-    migratorPool,
-    appPool,
-    workerPool,
-    connectionString,
-    resetTenantRows,
-    stop,
-  };
 }

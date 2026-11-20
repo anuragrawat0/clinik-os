@@ -140,25 +140,98 @@ describe('M0 PostgreSQL foundation', () => {
     const host = harness.container.getHost();
     const port = harness.container.getMappedPort(5432);
     const scratchUrl = `postgresql://clinic_migrator:${migratorPassword}@${host}:${port}/${scratchDatabase}`;
+    let pool: Pool | undefined;
+    let testError: unknown;
+    let testFailed = false;
+    const cleanupErrors: unknown[] = [];
 
     try {
       await runMigrations(scratchUrl, 'up', migrationsDirectory);
       await runMigrations(scratchUrl, 'down', migrationsDirectory);
       await runMigrations(scratchUrl, 'up', migrationsDirectory);
 
-      const pool = new Pool({ connectionString: scratchUrl, max: 1 });
-      try {
-        const helpers = await pool.query<{ count: number }>(
-          `SELECT count(*)::int AS count
+      pool = new Pool({ connectionString: scratchUrl, max: 1 });
+      const helpers = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count
              FROM pg_proc
             WHERE proname IN ('attach_tenant_rls', 'attach_set_updated_at')`,
-        );
-        expect(helpers.rows[0]?.count).toBe(2);
-      } finally {
-        await pool.end();
-      }
+      );
+      expect(helpers.rows[0]?.count).toBe(2);
+    } catch (error) {
+      testFailed = true;
+      testError = error;
     } finally {
-      await harness.adminPool.query(`DROP DATABASE IF EXISTS ${scratchDatabase} WITH (FORCE)`);
+      if (pool) {
+        try {
+          await pool.end();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+
+      let remainingConnections: Array<{
+        pid: number;
+        usename: string;
+        application_name: string;
+        state: string | null;
+      }> = [];
+      let connectionCheckSucceeded = false;
+      const maxConnectionChecks = 40;
+      for (let attempt = 0; attempt < maxConnectionChecks; attempt++) {
+        try {
+          const result = await harness.adminPool.query<{
+            pid: number;
+            usename: string;
+            application_name: string;
+            state: string | null;
+          }>(
+            `SELECT pid, usename, application_name, state
+               FROM pg_stat_activity
+              WHERE datname = $1 AND pid <> pg_backend_pid()`,
+            [scratchDatabase],
+          );
+          connectionCheckSucceeded = true;
+          remainingConnections = result.rows;
+        } catch (error) {
+          cleanupErrors.push(error);
+          break;
+        }
+
+        if (remainingConnections.length === 0) break;
+        if (attempt < maxConnectionChecks - 1) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+        }
+      }
+
+      if (connectionCheckSucceeded) {
+        if (remainingConnections.length > 0) {
+          const connections = remainingConnections
+            .map(
+              ({ pid, usename, application_name, state }) =>
+                `${pid}:${usename}/${application_name}/${state ?? 'unknown'}`,
+            )
+            .join(', ');
+          cleanupErrors.push(
+            new Error(
+              `Scratch database still has ${remainingConnections.length} open connection(s) after polling: ${connections}`,
+            ),
+          );
+        } else {
+          try {
+            await harness.adminPool.query(`DROP DATABASE IF EXISTS ${scratchDatabase}`);
+          } catch (error) {
+            cleanupErrors.push(error);
+          }
+        }
+      }
     }
+
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        testFailed ? [testError, ...cleanupErrors] : cleanupErrors,
+        'Scratch database cleanup failed.',
+      );
+    }
+    if (testFailed) throw testError;
   });
 });
