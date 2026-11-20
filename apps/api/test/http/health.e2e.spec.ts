@@ -16,7 +16,11 @@ describe('GET /api/v1/health', () => {
       providers: [{ provide: DATABASE, useValue: database }],
     }).compile();
     app = moduleRef.createNestApplication();
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
     configureHttpApp(app);
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
     await app.init();
   });
 
@@ -40,5 +44,10 @@ describe('GET /api/v1/health', () => {
       code: 'REQUEST_FAILED',
     });
     expect(JSON.stringify(response.body)).not.toContain('synthetic patient data');
+  });
+
+  it('does not register Swagger routes in production', async () => {
+    await request(app.getHttpServer()).get('/api/docs').expect(404);
+    await request(app.getHttpServer()).get('/api/docs-json').expect(404);
   });
 });

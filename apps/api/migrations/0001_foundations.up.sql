@@ -28,8 +28,13 @@ CREATE OR REPLACE FUNCTION attach_set_updated_at(p_table regclass) RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  trigger_name text := replace(p_table::text, '.', '_') || '_set_updated_at';
+  trigger_name text;
 BEGIN
+  SELECT relation.relname || '_set_updated_at'
+    INTO trigger_name
+    FROM pg_class AS relation
+   WHERE relation.oid = p_table;
+
   IF NOT EXISTS (
     SELECT 1
       FROM pg_attribute
@@ -45,6 +50,34 @@ BEGIN
   EXECUTE format(
     'CREATE TRIGGER %I BEFORE UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION set_updated_at()',
     trigger_name,
+    p_table
+  );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION attach_tenant_rls(p_table regclass) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  policy_name text := 'tenant_isolation';
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_attribute
+     WHERE attrelid = p_table
+       AND attname = 'organization_id'
+       AND attnum > 0
+       AND NOT attisdropped
+  ) THEN
+    RAISE EXCEPTION 'table % has no organization_id column', p_table USING ERRCODE = 'check_violation';
+  END IF;
+
+  EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', p_table);
+  EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', p_table);
+  EXECUTE format('DROP POLICY IF EXISTS %I ON %s', policy_name, p_table);
+  EXECUTE format(
+    'CREATE POLICY %I ON %s USING (organization_id = app_current_org()) WITH CHECK (organization_id = app_current_org())',
+    policy_name,
     p_table
   );
 END
@@ -96,3 +129,5 @@ GRANT EXECUTE ON FUNCTION forbid_mutation() TO clinic_app, clinic_worker;
 GRANT EXECUTE ON FUNCTION forbid_delete() TO clinic_app, clinic_worker;
 REVOKE ALL ON FUNCTION attach_set_updated_at(regclass) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION attach_set_updated_at(regclass) TO clinic_migrator;
+REVOKE ALL ON FUNCTION attach_tenant_rls(regclass) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION attach_tenant_rls(regclass) TO clinic_migrator;

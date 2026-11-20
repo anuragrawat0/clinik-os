@@ -2,6 +2,7 @@ import { DynamicModule, Module } from '@nestjs/common';
 import { Pool } from 'pg';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { sql } from 'drizzle-orm';
+import { findRuntimeRoleViolations, readRuntimeRoleState } from './role-self-check';
 
 export const DATABASE = Symbol('DATABASE');
 
@@ -25,22 +26,10 @@ export class DatabaseConnection {
   }
 
   async onModuleInit(): Promise<void> {
-    const result = await this.pool.query<{
-      current_user: string;
-      rolsuper: boolean;
-      rolbypassrls: boolean;
-    }>(
-      `SELECT current_user,
-              roles.rolsuper,
-              roles.rolbypassrls
-         FROM pg_roles AS roles
-        WHERE roles.rolname = current_user`,
-    );
-    const role = result.rows[0];
-    if (!role || role.current_user !== this.expectedRole || role.rolsuper || role.rolbypassrls) {
-      throw new Error(
-        `Database must connect as non-owner role ${this.expectedRole} without BYPASSRLS.`,
-      );
+    const state = await readRuntimeRoleState(this.pool);
+    const violations = findRuntimeRoleViolations(state, this.expectedRole);
+    if (violations.length > 0) {
+      throw new Error(`Refusing to start with an unsafe database role: ${violations.join('; ')}.`);
     }
   }
 

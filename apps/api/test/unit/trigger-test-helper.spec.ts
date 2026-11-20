@@ -15,4 +15,12 @@ describe('trigger test SQLSTATE assertions', () => {
       assertExpectedSqlState({ code: '42703', message: 'undefined column' }, ['42703']),
     ).toThrow(/programming error/);
   });
+
+  it('reads the SQLSTATE from a wrapped driver error', () => {
+    const wrapped = {
+      message: 'Failed query',
+      cause: { code: '42501', message: 'new row violates row-level security policy' },
+    };
+    expect(() => assertExpectedSqlState(wrapped, ['42501'])).not.toThrow();
+  });
 });

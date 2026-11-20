@@ -1,11 +1,20 @@
 interface DatabaseErrorLike {
   code?: string;
   message?: string;
+  cause?: unknown;
 }
 
 function databaseError(error: unknown): DatabaseErrorLike | undefined {
-  if (typeof error !== 'object' || error === null) return undefined;
-  return error as DatabaseErrorLike;
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== 'object' || current === null) return undefined;
+    const candidate = current as DatabaseErrorLike;
+    if (typeof candidate.code === 'string') {
+      return { code: candidate.code, message: candidate.message };
+    }
+    current = candidate.cause;
+  }
+  return undefined;
 }
 
 export function assertExpectedSqlState(error: unknown, acceptedCodes: readonly string[]): void {

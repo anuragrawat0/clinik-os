@@ -23,8 +23,21 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['**/core/db/**'],
-              message: 'Job handlers must access tenant data through runInTenant.',
+              group: [
+                '**/core/db',
+                '**/core/db/**',
+                '**/db',
+                '**/db/**',
+                '**/database.module',
+                'pg',
+                'pg/**',
+                'pg-boss',
+                'pg-boss/**',
+                'drizzle-orm',
+                'drizzle-orm/**',
+              ],
+              message:
+                'Job handlers must access tenant data only through runInTenant; direct database clients and transaction helpers are not allowed.',
             },
           ],
         },

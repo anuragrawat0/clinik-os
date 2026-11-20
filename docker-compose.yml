@@ -6,40 +6,39 @@ services:
     environment:
       POSTGRES_DB: ${DB_NAME:-clinik_os}
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-local_postgres_superuser_password}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?Set POSTGRES_SUPERUSER_PASSWORD in .env}
       DB_NAME: ${DB_NAME:-clinik_os}
-      CLINIC_MIGRATOR_PASSWORD: ${CLINIC_MIGRATOR_PASSWORD:-local_clinic_migrator_password}
-      CLINIC_APP_PASSWORD: ${CLINIC_APP_PASSWORD:-local_clinic_app_password}
-      CLINIC_WORKER_PASSWORD: ${CLINIC_WORKER_PASSWORD:-local_clinic_worker_password}
+      CLINIC_MIGRATOR_PASSWORD: ${CLINIC_MIGRATOR_PASSWORD:?Set CLINIC_MIGRATOR_PASSWORD in .env}
+      CLINIC_APP_PASSWORD: ${CLINIC_APP_PASSWORD:?Set CLINIC_APP_PASSWORD in .env}
+      CLINIC_WORKER_PASSWORD: ${CLINIC_WORKER_PASSWORD:?Set CLINIC_WORKER_PASSWORD in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/bootstrap/001-roles.sh:/docker-entrypoint-initdb.d/001-roles.sh:ro
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres -d $${POSTGRES_DB}']
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5432 -U postgres -d $${POSTGRES_DB}']
       interval: 3s
       timeout: 3s
       retries: 30
     restart: unless-stopped
 
   minio:
-    build:
-      context: .
-      dockerfile: docker/minio.Dockerfile
-      args:
-        MINIO_VERSION: RELEASE.2025-10-15T17-29-55Z
+    image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+    pull_policy: missing
     command: ['server', '/data', '--console-address', ':9001']
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-clinik_minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-local_minio_root_password}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
     volumes:
       - minio_data:/data
     ports:
-      - '9000:9000'
-      - '9001:9001'
+      - '127.0.0.1:9000:9000'
+      - '127.0.0.1:9001:9001'
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live']
+      test:
+        - CMD-SHELL
+        - 'mc alias set local http://127.0.0.1:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" --api S3v4 >/dev/null 2>&1 && mc ready local'
       interval: 5s
       timeout: 3s
       retries: 20
@@ -48,8 +47,8 @@ services:
   mailpit:
     image: axllent/mailpit:latest
     ports:
-      - '1025:1025'
-      - '8025:8025'
+      - '127.0.0.1:1025:1025'
+      - '127.0.0.1:8025:8025'
     restart: unless-stopped
 
   migrate:
@@ -57,11 +56,12 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: api
-    command: ['pnpm', 'db:migrate']
+    command: ['node', 'dist/core/db/migrate.js', 'up']
+    init: true
     environment:
       NODE_ENV: development
       SERVICE_NAME: migrator
-      MIGRATOR_DATABASE_URL: postgresql://clinic_migrator:${CLINIC_MIGRATOR_PASSWORD:-local_clinic_migrator_password}@postgres:5432/${DB_NAME:-clinik_os}
+      MIGRATOR_DATABASE_URL: postgresql://clinic_migrator:${CLINIC_MIGRATOR_PASSWORD:?Set CLINIC_MIGRATOR_PASSWORD in .env}@postgres:5432/${DB_NAME:-clinik_os}
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,9 +77,10 @@ services:
       SERVICE_NAME: api
       LOG_LEVEL: info
       API_PORT: 3001
-      DATABASE_URL: postgresql://clinic_app:${CLINIC_APP_PASSWORD:-local_clinic_app_password}@postgres:5432/${DB_NAME:-clinik_os}
+      DATABASE_URL: postgresql://clinic_app:${CLINIC_APP_PASSWORD:?Set CLINIC_APP_PASSWORD in .env}@postgres:5432/${DB_NAME:-clinik_os}
+    init: true
     ports:
-      - '3001:3001'
+      - '127.0.0.1:3001:3001'
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -100,12 +101,13 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: api
-    command: ['pnpm', 'worker:start']
+    command: ['node', 'dist/worker.js']
+    init: true
     environment:
       NODE_ENV: development
       SERVICE_NAME: worker
       LOG_LEVEL: info
-      WORKER_DATABASE_URL: postgresql://clinic_worker:${CLINIC_WORKER_PASSWORD:-local_clinic_worker_password}@postgres:5432/${DB_NAME:-clinik_os}
+      WORKER_DATABASE_URL: postgresql://clinic_worker:${CLINIC_WORKER_PASSWORD:?Set CLINIC_WORKER_PASSWORD in .env}@postgres:5432/${DB_NAME:-clinik_os}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -116,14 +118,26 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: web
+      args:
+        API_INTERNAL_ORIGIN: http://api:3001
     environment:
       NODE_ENV: production
-      API_INTERNAL_ORIGIN: http://api:3001
+    init: true
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3000:3000'
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - 'fetch("http://127.0.0.1:3000/").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     restart: unless-stopped
 
 volumes:

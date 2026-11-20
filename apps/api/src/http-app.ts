@@ -35,6 +35,8 @@ export function configureHttpApp(app: INestApplication): OpenAPIObject {
     .setVersion('0.1.0')
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('api/docs', app, document);
+  if (process.env.NODE_ENV !== 'production') {
+    SwaggerModule.setup('api/docs', app, document);
+  }
   return document;
 }

@@ -1,3 +1,5 @@
+REVOKE EXECUTE ON FUNCTION attach_tenant_rls(regclass) FROM clinic_migrator;
+DROP FUNCTION IF EXISTS attach_tenant_rls(regclass);
 REVOKE EXECUTE ON FUNCTION attach_set_updated_at(regclass) FROM clinic_migrator;
 DROP FUNCTION IF EXISTS attach_set_updated_at(regclass);
 DROP FUNCTION IF EXISTS forbid_delete();

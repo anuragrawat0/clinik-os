@@ -1,4 +1,6 @@
 .git
+.corepack-cache
+.corepack-bin
 .env
 .env.*
 !.env.example

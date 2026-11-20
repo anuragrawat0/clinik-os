@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Pool, type PoolClient } from 'pg';
+import { connectWithRetry } from './connect-with-retry';
 import { logger } from '../logging/logger';
 
 const migrationSchema = 'clinik_meta';
@@ -116,9 +117,21 @@ export async function runMigrations(
   direction: 'up' | 'down' = 'up',
   migrationsDirectory = resolve(process.cwd(), 'migrations'),
 ): Promise<void> {
-  const pool = new Pool({ connectionString, max: 1, application_name: 'clinik-migrator' });
-  const client = await pool.connect();
+  const pool = new Pool({
+    connectionString,
+    max: 1,
+    connectionTimeoutMillis: 3_000,
+    application_name: 'clinik-migrator',
+  });
+  let client: PoolClient | undefined;
   try {
+    client = await connectWithRetry(() => pool.connect(), {
+      onRetry: (attempt, code) =>
+        logger.warn(
+          { attempt, maxAttempts: 12, databaseErrorCode: code },
+          'PostgreSQL is not ready; retrying migration connection',
+        ),
+    });
     const identity = await client.query<{ current_user: string; rolsuper: boolean }>(
       `SELECT current_user, roles.rolsuper
          FROM pg_roles AS roles
@@ -136,8 +149,10 @@ export async function runMigrations(
       await runDown(client, migrations);
     }
   } finally {
-    await client.query('SELECT pg_advisory_unlock($1)', [advisoryLockKey]).catch(() => undefined);
-    client.release();
+    if (client) {
+      await client.query('SELECT pg_advisory_unlock($1)', [advisoryLockKey]).catch(() => undefined);
+      client.release();
+    }
     await pool.end();
   }
 }

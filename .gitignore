@@ -1,7 +1,3 @@
-# Private AI agent context
-/docs/
-/AGENTS.md
-
 # Database test script
 /database/tests/smoke2.sql
 
@@ -18,3 +14,4 @@ coverage/
 *.log
 .corepack-cache/
 .corepack-bin/
+docs/

@@ -1,6 +1,10 @@
 {
   "name": "@clinik/api",
   "private": true,
+  "files": [
+    "dist",
+    "migrations"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && pnpm openapi:generate",
     "start:dev": "tsx watch src/main.ts",
