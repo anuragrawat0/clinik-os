@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS staff_role_assignments;
+DROP TABLE IF EXISTS invitations;
+DROP TABLE IF EXISTS organization_members;
+DROP TABLE IF EXISTS tenant_counters;
+DROP TABLE IF EXISTS branches;
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS auth_tokens;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS organizations;
+DROP TABLE IF EXISTS users;
