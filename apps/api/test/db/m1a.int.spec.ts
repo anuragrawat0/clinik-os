@@ -27,7 +27,6 @@ const m1aTables = [
   'organization_members',
   'staff_role_assignments',
   'invitations',
-  'tenant_counters',
   'audit_logs',
 ];
 
@@ -47,7 +46,7 @@ async function expectSqlState(operation: Promise<unknown>, acceptedCodes: string
 
 async function seedM1aRows(): Promise<void> {
   await harness.adminPool.query(`
-    TRUNCATE audit_logs, invitations, staff_role_assignments, organization_members, tenant_counters,
+    TRUNCATE audit_logs, invitations, staff_role_assignments, organization_members,
              branches, sessions, auth_tokens, organizations, users RESTART IDENTITY CASCADE
   `);
   await harness.adminPool.query(
@@ -85,11 +84,6 @@ async function seedM1aRows(): Promise<void> {
     [organizationA, organizationB, userA, userOther, branchA],
   );
   await harness.adminPool.query(
-    `INSERT INTO tenant_counters (organization_id, counter, next_value) VALUES
-       ($1, 'mrn', 10), ($2, 'mrn', 20)`,
-    [organizationA, organizationB],
-  );
-  await harness.adminPool.query(
     `INSERT INTO audit_logs (organization_id, actor_type, action, resource_type, outcome) VALUES
        ($1, 'system', 'test.org_a', 'test', 'success'),
        ($2, 'system', 'test.org_b', 'test', 'success'),
@@ -113,23 +107,78 @@ describe('M1-A database and security foundation', () => {
     await seedM1aRows();
   });
 
-  it('rolls the M1-A migration down and reapplies it from the M0 baseline', async () => {
-    await runMigrations(harness.connectionString('clinic_migrator'), 'down', migrationsDirectory);
-    const missing = await harness.adminPool.query<{ count: number }>(
-      `SELECT count(*)::int AS count FROM pg_tables
-        WHERE schemaname = 'public' AND tablename = ANY($1)`,
-      [m1aTables],
-    );
-    expect(missing.rows[0]?.count).toBe(0);
+  it('restores the 0002 counter table, forced RLS, and worker grants on 0003 rollback', async () => {
+    const connectionString = harness.connectionString('clinic_migrator');
+    await runMigrations(connectionString, 'down', migrationsDirectory);
+    try {
+      const columns = await harness.adminPool.query(`
+        SELECT column_name, data_type, is_nullable, column_default
+          FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'tenant_counters'
+         ORDER BY ordinal_position
+      `);
+      expect(columns.rows).toEqual([
+        {
+          column_name: 'organization_id',
+          data_type: 'uuid',
+          is_nullable: 'NO',
+          column_default: null,
+        },
+        { column_name: 'counter', data_type: 'text', is_nullable: 'NO', column_default: null },
+        { column_name: 'next_value', data_type: 'bigint', is_nullable: 'NO', column_default: '1' },
+      ]);
 
-    await runMigrations(harness.connectionString('clinic_migrator'), 'up', migrationsDirectory);
-    const restored = await harness.adminPool.query<{ count: number }>(
-      `SELECT count(*)::int AS count FROM pg_tables
-        WHERE schemaname = 'public' AND tablename = ANY($1)`,
-      [m1aTables],
+      const constraints = await harness.adminPool.query<{ definition: string }>(`
+        SELECT pg_get_constraintdef(oid) AS definition
+          FROM pg_constraint
+         WHERE conrelid = 'public.tenant_counters'::regclass
+      `);
+      expect(constraints.rows.map(({ definition }) => definition).sort()).toEqual([
+        "CHECK ((counter = ANY (ARRAY['mrn'::text, 'invoice'::text, 'claim'::text])))",
+        'CHECK ((next_value > 0))',
+        'FOREIGN KEY (organization_id) REFERENCES organizations(id)',
+        'PRIMARY KEY (organization_id, counter)',
+      ]);
+
+      const access = await harness.adminPool.query(`
+        SELECT relrowsecurity AS rls, relforcerowsecurity AS forced,
+               has_table_privilege('clinic_worker', oid, 'SELECT') AS can_select,
+               has_table_privilege('clinic_worker', oid, 'INSERT') AS can_insert,
+               has_table_privilege('clinic_worker', oid, 'UPDATE') AS can_update,
+               has_table_privilege('clinic_worker', oid, 'DELETE') AS can_delete
+          FROM pg_class
+         WHERE oid = 'public.tenant_counters'::regclass
+      `);
+      expect(access.rows).toEqual([
+        {
+          rls: true,
+          forced: true,
+          can_select: true,
+          can_insert: true,
+          can_update: true,
+          can_delete: false,
+        },
+      ]);
+      const policies = await harness.adminPool.query(`
+        SELECT policyname, qual, with_check
+          FROM pg_policies
+         WHERE schemaname = 'public' AND tablename = 'tenant_counters'
+      `);
+      expect(policies.rows).toEqual([
+        {
+          policyname: 'tenant_isolation',
+          qual: '(organization_id = app_current_org())',
+          with_check: '(organization_id = app_current_org())',
+        },
+      ]);
+    } finally {
+      await runMigrations(connectionString, 'up', migrationsDirectory);
+    }
+
+    const afterReapply = await harness.adminPool.query(
+      `SELECT to_regclass('public.tenant_counters') IS NULL AS counters_removed`,
     );
-    expect(restored.rows[0]?.count).toBe(m1aTables.length);
-    await seedM1aRows();
+    expect(afterReapply.rows).toEqual([{ counters_removed: true }]);
   });
 
   it('creates all approved tables, constraints, and indexes', async () => {
@@ -194,9 +243,6 @@ describe('M1-A database and security foundation', () => {
     expect(definitions('invitations').join(' ')).toContain('patient_id is null');
     expect(definitions('invitations').join(' ')).toContain('accepted_at is null');
     expect(definitions('invitations').join(' ')).not.toContain("role = 'patient'");
-    expect(definitions('tenant_counters').join(' ')).toContain('references organizations(id)');
-    expect(definitions('tenant_counters').join(' ')).toContain("counter = any (array['mrn'");
-    expect(definitions('tenant_counters').join(' ')).toContain('next_value > 0');
     expect(definitions('audit_logs').join(' ')).toContain('primary key (id)');
     expect(definitions('audit_logs').join(' ')).toContain("actor_type = any (array['user'");
     expect(definitions('audit_logs').join(' ')).toContain("outcome = any (array['success'");
@@ -244,9 +290,8 @@ describe('M1-A database and security foundation', () => {
     const withoutContext = await Promise.all([
       harness.appPool.query('SELECT id FROM branches'),
       harness.appPool.query('SELECT id FROM invitations'),
-      harness.appPool.query('SELECT organization_id FROM tenant_counters'),
     ]);
-    expect(withoutContext.map((result) => result.rowCount)).toEqual([0, 0, 0]);
+    expect(withoutContext.map((result) => result.rowCount)).toEqual([0, 0]);
 
     await expectSqlState(
       harness.appPool.query(
@@ -260,10 +305,6 @@ describe('M1-A database and security foundation', () => {
     await withTenantTransaction(appDatabase, { orgId: organizationA }, async (tx) => {
       const otherBranch = await tx.execute(sql`SELECT id FROM branches WHERE id = ${branchB}`);
       expect(otherBranch.rowCount).toBe(0);
-      const otherCounter = await tx.execute(
-        sql`SELECT next_value FROM tenant_counters WHERE organization_id = ${organizationB}`,
-      );
-      expect(otherCounter.rowCount).toBe(0);
       const otherInvitation = await tx.execute(
         sql`SELECT id FROM invitations WHERE organization_id = ${organizationB}`,
       );
@@ -273,11 +314,6 @@ describe('M1-A database and security foundation', () => {
         sql`UPDATE branches SET name = 'Cross Tenant' WHERE id = ${branchB}`,
       );
       expect(hiddenUpdate.rowCount).toBe(0);
-      const hiddenCounterUpdate = await tx.execute(sql`
-        UPDATE tenant_counters SET next_value = next_value + 1
-        WHERE organization_id = ${organizationB}
-      `);
-      expect(hiddenCounterUpdate.rowCount).toBe(0);
     });
 
     await expectSqlState(
@@ -286,15 +322,6 @@ describe('M1-A database and security foundation', () => {
           INSERT INTO branches (organization_id, name, code, timezone)
           VALUES (${organizationB}, 'Cross Tenant', 'XBR', 'UTC')
         `),
-      ),
-      ['42501'],
-    );
-    await expectSqlState(
-      withTenantTransaction(appDatabase, { orgId: organizationA }, (tx) =>
-        tx.execute(sql`
-        INSERT INTO tenant_counters (organization_id, counter)
-        VALUES (${organizationB}, 'invoice')
-      `),
       ),
       ['42501'],
     );
@@ -532,15 +559,12 @@ describe('M1-A database and security foundation', () => {
     );
     expect(workerBranch.rows).toEqual([{ id: branchA }]);
     await withTenantTransaction(workerDatabase, { orgId: organizationA }, async (tx) => {
-      const counterUpdate = await tx.execute(sql`
-        UPDATE tenant_counters SET next_value = next_value + 1
-        WHERE organization_id = ${organizationA} AND counter = 'mrn'
-      `);
-      expect(counterUpdate.rowCount).toBe(1);
-      await tx.execute(sql`
+      const auditInsert = await tx.execute(sql`
         INSERT INTO audit_logs (organization_id, actor_type, action, resource_type, outcome)
         VALUES (${organizationA}, 'system', 'test.worker', 'test', 'success')
+        RETURNING id::text AS id
       `);
+      expect(auditInsert.rows[0]?.id).toMatch(/^[1-9]\d*$/);
     });
     await expectSqlState(
       harness.workerPool.query(
@@ -552,10 +576,6 @@ describe('M1-A database and security foundation', () => {
     const privileges = await harness.adminPool.query<{
       branches_select: boolean;
       branches_insert: boolean;
-      counters_select: boolean;
-      counters_insert: boolean;
-      counters_update: boolean;
-      counters_delete: boolean;
       audit_select: boolean;
       audit_insert: boolean;
       audit_update: boolean;
@@ -567,10 +587,6 @@ describe('M1-A database and security foundation', () => {
     }>(`
       SELECT has_table_privilege('clinic_worker', 'public.branches', 'SELECT') AS branches_select,
              has_table_privilege('clinic_worker', 'public.branches', 'INSERT') AS branches_insert,
-             has_table_privilege('clinic_worker', 'public.tenant_counters', 'SELECT') AS counters_select,
-             has_table_privilege('clinic_worker', 'public.tenant_counters', 'INSERT') AS counters_insert,
-             has_table_privilege('clinic_worker', 'public.tenant_counters', 'UPDATE') AS counters_update,
-             has_table_privilege('clinic_worker', 'public.tenant_counters', 'DELETE') AS counters_delete,
              has_table_privilege('clinic_worker', 'public.audit_logs', 'SELECT') AS audit_select,
              has_table_privilege('clinic_worker', 'public.audit_logs', 'INSERT') AS audit_insert,
              has_table_privilege('clinic_worker', 'public.audit_logs', 'UPDATE') AS audit_update,
@@ -583,10 +599,6 @@ describe('M1-A database and security foundation', () => {
     expect(privileges.rows[0]).toEqual({
       branches_select: true,
       branches_insert: false,
-      counters_select: true,
-      counters_insert: true,
-      counters_update: true,
-      counters_delete: false,
       audit_select: true,
       audit_insert: true,
       audit_update: false,
@@ -612,10 +624,12 @@ describe('M1-A database and security foundation', () => {
         const visible = await tx.execute(sql`SELECT action FROM audit_logs ORDER BY action`);
         expect(visible.rows).toEqual([{ action: 'test.org_a' }]);
 
-        await tx.execute(sql`
+        const auditInsert = await tx.execute(sql`
         INSERT INTO audit_logs (organization_id, actor_type, action, resource_type, outcome)
         VALUES (${organizationA}, 'user', 'test.app', 'test', 'success')
+        RETURNING id::text AS id
       `);
+        expect(auditInsert.rows[0]?.id).toMatch(/^[1-9]\d*$/);
         await tx.execute(sql`
         INSERT INTO audit_logs (organization_id, actor_type, action, resource_type, outcome)
         VALUES (NULL, 'system', 'test.platform_app', 'test', 'success')

@@ -1,5 +1,5 @@
 # Database test script
-/database/tests/smoke2.sql
+/database/tests/reference/smoke3_v12.sql
 
 # Local configuration and generated artifacts
 .env

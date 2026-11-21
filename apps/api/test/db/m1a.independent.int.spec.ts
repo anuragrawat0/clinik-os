@@ -28,7 +28,6 @@ const m1aTables = [
   'organization_members',
   'staff_role_assignments',
   'invitations',
-  'tenant_counters',
   'audit_logs',
 ] as const;
 
@@ -37,7 +36,6 @@ const tenantTables = [
   'organization_members',
   'staff_role_assignments',
   'invitations',
-  'tenant_counters',
   'audit_logs',
 ] as const;
 
@@ -132,7 +130,6 @@ const expectedColumns: Record<(typeof m1aTables)[number], string[]> = {
     'revoked_at',
     'created_at',
   ],
-  tenant_counters: ['organization_id', 'counter', 'next_value'],
   audit_logs: [
     'id',
     'occurred_at',
@@ -207,7 +204,6 @@ const expectedNotNull: Record<(typeof m1aTables)[number], string[]> = {
     'expires_at',
     'created_at',
   ],
-  tenant_counters: ['organization_id', 'counter', 'next_value'],
   audit_logs: [
     'id',
     'occurred_at',
@@ -235,7 +231,7 @@ async function expectSqlState(operation: Promise<unknown>, acceptedCodes: string
 
 async function seedRows(): Promise<void> {
   await harness.adminPool.query(`
-    TRUNCATE audit_logs, invitations, staff_role_assignments, organization_members, tenant_counters,
+    TRUNCATE audit_logs, invitations, staff_role_assignments, organization_members,
              branches, sessions, auth_tokens, organizations, users RESTART IDENTITY CASCADE
   `);
   await harness.adminPool.query(
@@ -271,11 +267,6 @@ async function seedRows(): Promise<void> {
          ($1, 'doctor-a@example.test', 'doctor', $3, NULL, decode('01', 'hex'), $5, now() + interval '1 day'),
          ($2, 'reception-b@example.test', 'receptionist', $4, NULL, decode('02', 'hex'), $5, now() + interval '1 day')`,
     [organizationA, organizationB, branchA, branchB, userA],
-  );
-  await harness.adminPool.query(
-    `INSERT INTO tenant_counters (organization_id, counter, next_value) VALUES
-       ($1, 'mrn', 10), ($2, 'mrn', 20)`,
-    [organizationA, organizationB],
   );
   await harness.adminPool.query(
     `INSERT INTO audit_logs (organization_id, actor_type, action, resource_type, outcome) VALUES
@@ -318,6 +309,42 @@ async function effectivePrivileges(
   );
 }
 
+async function expectAppSequencePrivileges(
+  pool: Pool,
+  sequenceNames: readonly string[],
+  privileges: readonly string[],
+): Promise<void> {
+  const sequences = await pool.query(`
+    SELECT relname AS name,
+           has_sequence_privilege('clinic_app', oid, 'USAGE') AS can_use,
+           has_sequence_privilege('clinic_app', oid, 'SELECT') AS can_select,
+           has_sequence_privilege('clinic_app', oid, 'UPDATE') AS can_update
+      FROM pg_class
+     WHERE relnamespace = 'public'::regnamespace AND relkind = 'S'
+     ORDER BY relname
+  `);
+  expect(sequences.rows).toEqual(
+    sequenceNames.map((name) => ({
+      name,
+      can_use: privileges.includes('USAGE'),
+      can_select: privileges.includes('SELECT'),
+      can_update: privileges.includes('UPDATE'),
+    })),
+  );
+
+  const defaults = await pool.query<{ privilege_type: string }>(`
+    SELECT acl.privilege_type
+      FROM pg_default_acl AS defaults
+      CROSS JOIN LATERAL aclexplode(defaults.defaclacl) AS acl
+     WHERE defaults.defaclrole = 'clinic_migrator'::regrole
+       AND defaults.defaclnamespace = 'public'::regnamespace
+       AND defaults.defaclobjtype = 'S'
+       AND acl.grantee = 'clinic_app'::regrole
+     ORDER BY acl.privilege_type
+  `);
+  expect(defaults.rows.map(({ privilege_type }) => privilege_type)).toEqual(privileges);
+}
+
 describe('M1-A independent verification', () => {
   beforeAll(async () => {
     harness = await startDatabaseHarness();
@@ -332,7 +359,7 @@ describe('M1-A independent verification', () => {
     await seedRows();
   });
 
-  it('reaches M1-A from the real M0 baseline and reverses both migrations in a scratch database', async () => {
+  it('reverses and reapplies 0003 sequence grants and rolls back to the unmigrated baseline', async () => {
     const scratchDatabase = 'clinik_m1a_roundtrip';
     const host = harness.container.getHost();
     const port = harness.container.getMappedPort(5432);
@@ -352,20 +379,35 @@ describe('M1-A independent verification', () => {
       expect(applied.rows.map((row) => row.name)).toEqual([
         '0001_foundations',
         '0002_m1a_identity_tenancy',
+        '0003_v12_alignment',
       ]);
 
-      const tables = await pool.query<{ tablename: string }>(
-        `SELECT tablename FROM pg_tables
-              WHERE schemaname = 'public' AND tablename = ANY($1) ORDER BY tablename`,
-        [m1aTables],
-      );
+      const tables = await pool.query<{ tablename: string }>(`
+        SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename
+      `);
       expect(tables.rows.map((row) => row.tablename)).toEqual([...m1aTables].sort());
 
       await runMigrations(scratchUrl, 'down', migrationsDirectory);
       const afterOneDown = await pool.query<{ name: string }>(
         `SELECT name FROM clinik_meta.schema_migrations ORDER BY name`,
       );
-      expect(afterOneDown.rows.map((row) => row.name)).toEqual(['0001_foundations']);
+      expect(afterOneDown.rows.map((row) => row.name)).toEqual([
+        '0001_foundations',
+        '0002_m1a_identity_tenancy',
+      ]);
+      await expectAppSequencePrivileges(pool, ['audit_logs_id_seq'], ['SELECT', 'UPDATE', 'USAGE']);
+
+      await pool.query('CREATE SEQUENCE public.test_v12_alignment_seq');
+      const sequences = ['audit_logs_id_seq', 'test_v12_alignment_seq'];
+      await expectAppSequencePrivileges(pool, sequences, ['SELECT', 'UPDATE', 'USAGE']);
+
+      await runMigrations(scratchUrl, 'up', migrationsDirectory);
+      await expectAppSequencePrivileges(pool, sequences, ['USAGE']);
+      await runMigrations(scratchUrl, 'down', migrationsDirectory);
+      await expectAppSequencePrivileges(pool, sequences, ['SELECT', 'UPDATE', 'USAGE']);
+      await pool.query('DROP SEQUENCE public.test_v12_alignment_seq');
+
+      await runMigrations(scratchUrl, 'down', migrationsDirectory);
       const m1aAfterDown = await pool.query<{ count: number }>(
         `SELECT count(*)::int AS count FROM pg_tables
               WHERE schemaname = 'public' AND tablename = ANY($1)`,
@@ -386,6 +428,7 @@ describe('M1-A independent verification', () => {
       );
       expect(reapplied.rows[0]?.count).toBe(m1aTables.length);
 
+      await runMigrations(scratchUrl, 'down', migrationsDirectory);
       await runMigrations(scratchUrl, 'down', migrationsDirectory);
       await runMigrations(scratchUrl, 'down', migrationsDirectory);
       const empty = await pool.query<{ table: string | null; function: string | null }>(
@@ -455,6 +498,14 @@ describe('M1-A independent verification', () => {
     }
     if (testFailed) throw testError;
   }, 120_000);
+
+  it('removes tenant_counters and keeps only USAGE on existing and default sequence grants', async () => {
+    const counters = await harness.adminPool.query(
+      `SELECT to_regclass('public.tenant_counters') IS NULL AS counters_removed`,
+    );
+    expect(counters.rows).toEqual([{ counters_removed: true }]);
+    await expectAppSequencePrivileges(harness.adminPool, ['audit_logs_id_seq'], ['USAGE']);
+  });
 
   it('matches the approved column and NOT NULL inventory exactly', async () => {
     const columns = await harness.adminPool.query<{
@@ -573,14 +624,7 @@ describe('M1-A independent verification', () => {
   });
 
   it('returns no rows for every tenant table without context and rejects context-free inserts', async () => {
-    for (const table of [
-      'branches',
-      'organization_members',
-      'staff_role_assignments',
-      'invitations',
-      'tenant_counters',
-      'audit_logs',
-    ] as const) {
+    for (const table of tenantTables) {
       const result = await harness.appPool.query(`SELECT 1 FROM ${table} LIMIT 1`);
       expect(result.rowCount, `${table} without context`).toBe(0);
     }
@@ -751,12 +795,6 @@ describe('M1-A independent verification', () => {
       update: false,
       delete: false,
     });
-    expect(privileges.tenant_counters).toEqual({
-      select: true,
-      insert: true,
-      update: true,
-      delete: false,
-    });
     expect(privileges.audit_logs).toEqual({
       select: true,
       insert: true,
@@ -804,12 +842,6 @@ describe('M1-A independent verification', () => {
     );
     await expectSqlState(
       harness.workerPool.query(`DELETE FROM branches WHERE id = $1`, [branchA]),
-      ['42501'],
-    );
-    await expectSqlState(
-      harness.workerPool.query(`DELETE FROM tenant_counters WHERE organization_id = $1`, [
-        organizationA,
-      ]),
       ['42501'],
     );
     await expectSqlState(harness.workerPool.query(`UPDATE audit_logs SET action = 'tampered'`), [

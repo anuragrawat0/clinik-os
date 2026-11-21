@@ -250,22 +250,6 @@ export const staffRoleAssignments = pgTable(
   ],
 );
 
-export const tenantCounters = pgTable(
-  'tenant_counters',
-  {
-    organizationId: uuid('organization_id')
-      .notNull()
-      .references(() => organizations.id),
-    counter: text('counter').notNull(),
-    nextValue: bigint('next_value', { mode: 'bigint' }).notNull().default(1n),
-  },
-  (table) => [
-    primaryKey({ columns: [table.organizationId, table.counter] }),
-    check('tenant_counters_counter_check', sql`${table.counter} IN ('mrn', 'invoice', 'claim')`),
-    check('tenant_counters_next_value_check', sql`${table.nextValue} > 0`),
-  ],
-);
-
 export const auditLogs = pgTable(
   'audit_logs',
   {

@@ -64,7 +64,7 @@ describe('M0 PostgreSQL foundation', () => {
     expect(result.rowCount).toBe(0);
   });
 
-  it('rejects a worker insert without transaction-local tenant context (W2)', async () => {
+  it('rejects a worker insert without transaction-local tenant context (W1)', async () => {
     try {
       await harness.workerPool.query(
         `INSERT INTO ${tenantRows} (id, organization_id) VALUES (3, $1)`,
@@ -76,7 +76,7 @@ describe('M0 PostgreSQL foundation', () => {
     }
   });
 
-  it('scopes rows and clears tenant context after commit on a reused connection (W7)', async () => {
+  it('scopes rows and clears tenant context after commit on a reused connection (W3)', async () => {
     const visibleRows = await withTenantTransaction(
       appDatabase,
       { orgId: organizationA },
