@@ -94,7 +94,11 @@ jobs:
             return 1
           }
 
-          if curl --silent --max-time 2 "http://127.0.0.1:3001/" > /dev/null 2>&1;    then
+          wait_for_url "http://127.0.0.1:3000/" "Web"
+          wait_for_url "http://127.0.0.1:3000/api/v1/health" "API (via web proxy)"
+
+          # D28: the API must NOT be reachable on a host port
+          if curl --silent --max-time 2 "http://127.0.0.1:3001/" > /dev/null 2>&1; then
             echo "API port 3001 is published; it must only be reachable through web (D28)." >&2
             exit 1
           fi
@@ -126,13 +130,13 @@ jobs:
           docker compose --env-file .env.example up -d api worker web
 
           for attempt in $(seq 1 45); do
-            if curl --fail --silent --show-error http://127.0.0.1:3001/api/v1/health; then
+            if curl --fail --silent --show-error http://127.0.0.1:3000/api/v1/health; then
               echo ""
-              echo "API recovered successfully after migrations."
+              echo "API recovered successfully after migrations (via web proxy)."
               exit 0
             fi
 
-            echo "Waiting for API after migrations ($attempt/45)..."
+            echo "Waiting for API via web after migrations ($attempt/45)..."
             sleep 2
           done
 
