@@ -968,10 +968,12 @@ describe('password reset and email verification flows', () => {
     await expect(auth.verifyEmail('unknown-token', meta(ip))).resolves.toEqual({
       ok: false,
       code: 'RATE_LIMITED',
+      retryAfterSec: 60,
     });
     await expect(auth.resetPassword('unknown-token', NEW_PASSWORD, meta(ip))).resolves.toEqual({
       ok: false,
       code: 'RATE_LIMITED',
+      retryAfterSec: 60,
     });
     expect(limiter.consume('token-verify', ip).allowed).toBe(false);
   });

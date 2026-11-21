@@ -1,5 +1,5 @@
+import Link from 'next/link';
 import { HealthStatus } from '@/components/health-status';
-import { Button } from '@/components/ui/button';
 
 export default function HomePage() {
   return (
@@ -22,7 +22,9 @@ export default function HomePage() {
           appointments, records, and the day-to-day work around patient care.
         </p>
         <div className="welcome-panel__actions">
-          <Button type="button">Workspace ready</Button>
+          <Link className="button button--primary home-sign-in" href="/login">
+            Sign in
+          </Link>
           <span className="build-label">M0 · Foundations</span>
         </div>
       </section>

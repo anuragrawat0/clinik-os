@@ -32,6 +32,16 @@ const apiConfigSchema = commonConfigSchema.extend({
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
   DATABASE_URL: z.string().url(),
   TRUSTED_PROXY_CIDRS: trustedProxyCidrs,
+  SMTP_HOST: z.string().trim().min(1).default('127.0.0.1'),
+  SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(1025),
+  MAIL_FROM: z.email().default('no-reply@clinik.test'),
+  APP_BASE_URL: z
+    .url({ protocol: /^https?$/ })
+    .refine((value) => {
+      const url = new URL(value);
+      return url.username === '' && url.password === '' && url.href === `${url.origin}/`;
+    }, 'APP_BASE_URL must be an HTTP(S) origin.')
+    .default('http://127.0.0.1:3000'),
 });
 
 const workerConfigSchema = commonConfigSchema.extend({

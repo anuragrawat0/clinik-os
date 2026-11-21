@@ -144,6 +144,11 @@ h1 {
   color: var(--green);
 }
 
+.home-sign-in {
+  display: inline-flex;
+  align-items: center;
+}
+
 .build-label {
   color: var(--ink-soft);
   font-size: 13px;

@@ -1,0 +1,112 @@
+.auth-shell {
+  min-height: 100svh;
+  padding: 48px 16px;
+  display: grid;
+  place-items: center;
+}
+
+.auth-shell__inner {
+  width: min(100%, 464px);
+}
+
+.auth-brand {
+  width: fit-content;
+  font-size: 18px;
+  margin-bottom: 18px;
+}
+
+.auth-card {
+  display: grid;
+  gap: 18px;
+  padding: clamp(20px, 6vw, 34px);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: 0 16px 45px rgb(25 77 51 / 8%);
+  overflow-wrap: anywhere;
+}
+
+.auth-card h1 {
+  font-size: clamp(28px, 7vw, 42px);
+}
+
+.auth-card p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.auth-card a {
+  width: fit-content;
+  color: var(--green);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.auth-form,
+.auth-field,
+.auth-actions {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.auth-field {
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.auth-field input {
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid #a7b8ac;
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.auth-card :focus-visible,
+.auth-brand:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+
+.auth-card button {
+  min-height: 44px;
+}
+
+.auth-card button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.auth-error {
+  color: #9b2929;
+}
+
+.auth-details {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.auth-details dt {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink-soft);
+}
+
+.auth-details dd {
+  margin: 2px 0 0;
+}
+
+.auth-memberships {
+  padding-inline-start: 20px;
+  margin: 0;
+}
