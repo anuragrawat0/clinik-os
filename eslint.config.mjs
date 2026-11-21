@@ -5,7 +5,13 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/.next/**', '**/coverage/**', '**/openapi.json'],
+    ignores: [
+      '**/dist/**',
+      '**/dist-server/**',
+      '**/.next/**',
+      '**/coverage/**',
+      '**/openapi.json',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
