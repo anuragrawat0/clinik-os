@@ -1,6 +1,7 @@
 import { Controller, Get, Inject } from '@nestjs/common';
 import { ApiOkResponse, ApiProperty, ApiTags } from '@nestjs/swagger';
 import type { HealthResponse } from '@clinik/shared';
+import { Public } from '../auth/public.decorator';
 import { DATABASE, DatabaseConnection } from '../db/database.module';
 
 class HealthResponseDto implements HealthResponse {
@@ -12,6 +13,7 @@ class HealthResponseDto implements HealthResponse {
 }
 
 @ApiTags('health')
+@Public()
 @Controller('health')
 export class HealthController {
   constructor(@Inject(DATABASE) private readonly database: DatabaseConnection) {}
