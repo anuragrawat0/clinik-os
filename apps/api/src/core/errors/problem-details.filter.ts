@@ -17,7 +17,8 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     const http = host.switchToHttp();
     const request = http.getRequest<Request & { id?: string }>();
     const response = http.getResponse<Response>();
-    const invitationPath = /^\/api\/v1\/auth\/invitations(?:\/|$)/i.test(request.path);
+    const requestPath = (request.originalUrl ?? request.path).split(/[?#]/)[0];
+    const invitationPath = /^\/api\/v1\/auth\/invitations(?:\/|$)/i.test(requestPath);
     const status =
       invitationPath &&
       (exception instanceof URIError ||
@@ -45,12 +46,12 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       status,
       detail,
       // Invitation URLs carry a credential, including when a path parameter fails to decode.
-      instance: invitationPath ? '/api/v1/auth/invitations' : request.path,
+      instance: invitationPath ? '/api/v1/auth/invitations' : requestPath,
       code,
       ...(request.id ? { requestId: request.id } : {}),
     };
 
-    if (/^\/api\/v1\/auth(?:\/|$)/i.test(request.path))
+    if (/^\/api\/v1\/auth(?:\/|$)/i.test(requestPath))
       response.setHeader('Cache-Control', 'no-store');
     response.status(status).type('application/problem+json').json(problem);
   }
