@@ -2,6 +2,7 @@ import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import pinoHttp from 'pino-http';
+import { SESSION_COOKIE_NAME } from './core/auth/session-cookie';
 import { ProblemDetailsFilter } from './core/errors/problem-details.filter';
 import { createRequestId } from './core/logging/http-request-id';
 import { logger } from './core/logging/logger';
@@ -33,6 +34,7 @@ export function configureHttpApp(app: INestApplication): OpenAPIObject {
     .setTitle('Clinik OS API')
     .setDescription('Clinik OS modular monolith API')
     .setVersion('0.1.0')
+    .addCookieAuth(SESSION_COOKIE_NAME)
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   if (process.env.NODE_ENV !== 'production') {

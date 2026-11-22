@@ -17,7 +17,15 @@ import {
  * Every route that may be called without a session. Adding a public route must be a deliberate
  * edit of this list (reviewed in the PR), never an accident.
  */
-const ALLOWED_PUBLIC_ROUTES = ['GET /api/v1/health'];
+const ALLOWED_PUBLIC_ROUTES = [
+  'GET /api/v1/health',
+  'POST /api/v1/auth/login',
+  'POST /api/v1/auth/password/forgot',
+  'POST /api/v1/auth/password/reset',
+  'POST /api/v1/auth/email/verify',
+  'GET /api/v1/auth/invitations/:token',
+  'POST /api/v1/auth/invitations/:token/accept',
+];
 
 /**
  * Nest's own catch-all (registered in a nested router) that turns every unmatched path into a 404
@@ -29,7 +37,7 @@ const FRAMEWORK_ROUTES = ['_ALL <nested>*path'];
 /**
  * Test-only controller added to the REAL application wiring. It is neither @Public nor guarded
  * explicitly, so the 401/403 assertions below prove the global guards cover controllers they were
- * not written for (health is the only production route until slice 2 adds more).
+ * not written for.
  */
 @Controller('__probe')
 class ProbeController {

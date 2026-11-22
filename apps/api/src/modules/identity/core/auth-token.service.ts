@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gt, isNull } from 'drizzle-orm';
+import { and, eq, gt, isNull, sql } from 'drizzle-orm';
 import { CLOCK, type Clock } from '../../../core/clock/clock';
 import { DATABASE, DatabaseConnection } from '../../../core/db/database.module';
 import { authTokens } from '../../../core/db/schema/m1a';
@@ -30,8 +30,11 @@ export class AuthTokenService {
     ttlMs: number = DEFAULT_TTL_MS[purpose],
     tx?: Tx,
   ): Promise<string> {
-    const now = this.clock.now();
     return inTransaction(this.database, tx, async (executor) => {
+      await executor.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${userId}::uuid::text || ':' || ${purpose}::text, 0))`,
+      );
+      const now = this.clock.now();
       await executor
         .update(authTokens)
         .set({ consumedAt: now })

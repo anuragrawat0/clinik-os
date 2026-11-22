@@ -4,6 +4,8 @@ import { AuditModule } from './core/audit/audit.module';
 import { CoreAuthModule } from './core/auth/auth.module';
 import { ClockModule } from './core/clock/clock';
 import { HealthController } from './core/health/health.controller';
+import { IdentityHttpModule } from './modules/identity/identity-http.module';
+import { InvitationModule } from './modules/tenancy/invitation.module';
 
 export { database, identityCore };
 
@@ -14,6 +16,8 @@ export { database, identityCore };
     AuditModule.register(database),
     identityCore,
     CoreAuthModule.register(identityCore),
+    IdentityHttpModule,
+    InvitationModule,
   ],
   controllers: [HealthController],
 })

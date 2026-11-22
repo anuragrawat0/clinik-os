@@ -15,17 +15,20 @@ import type { AuthUser, PasswordPolicyError, RequestMeta } from './types';
 const MAX_EMAIL_LENGTH = 254;
 const MAX_LOGIN_PASSWORD_LENGTH = 1024;
 
+type RateLimited = { ok: false; code: 'RATE_LIMITED'; retryAfterSec: number };
+
 export type LoginResult =
   | { ok: true; rawToken: string; user: AuthUser }
   | { ok: false; code: 'INVALID_CREDENTIALS' }
-  | { ok: false; code: 'RATE_LIMITED'; retryAfterSec: number };
+  | RateLimited;
 
 export type ResetPasswordResult =
   | { ok: true; userId: string }
-  | { ok: false; code: 'INVALID_TOKEN' | 'RATE_LIMITED' | PasswordPolicyError };
+  | { ok: false; code: 'INVALID_TOKEN' | PasswordPolicyError }
+  | RateLimited;
 
 export type VerifyEmailResult =
-  { ok: true; userId: string } | { ok: false; code: 'INVALID_TOKEN' | 'RATE_LIMITED' };
+  { ok: true; userId: string } | { ok: false; code: 'INVALID_TOKEN' } | RateLimited;
 
 type UserRow = typeof users.$inferSelect;
 
@@ -152,6 +155,16 @@ export class AuthService {
     }
 
     const created = await this.database.db.transaction(async (tx) => {
+      // Match password reset's user-before-session order. The row lock permits FK checks
+      // on users from other transactions while serializing password and status updates.
+      const [current] = await tx
+        .select()
+        .from(users)
+        .where(eq(users.id, user.id))
+        .for('no key update');
+      if (current?.status !== 'active') return 'inactive' as const;
+      if (current.passwordHash !== user.passwordHash) return 'bad_password' as const;
+
       if (options.currentRawToken) {
         await this.sessions.revokeByRawToken(
           options.currentRawToken,
@@ -174,9 +187,12 @@ export class AuthService {
         },
         tx,
       );
-      return result;
+      return { rawToken: result.rawToken, user: toAuthUser(current) };
     });
-    return { ok: true, rawToken: created.rawToken, user: toAuthUser(user) };
+    if (typeof created === 'string') {
+      return this.failLogin(created, user.id, meta, created === 'bad_password');
+    }
+    return { ok: true, ...created };
   }
 
   async logout(rawToken: string, meta: RequestMeta): Promise<void> {
@@ -253,8 +269,9 @@ export class AuthService {
       ip: meta.ip,
       userAgent: meta.userAgent,
     };
-    if (!this.limiter.consume('token-verify', meta.ip).allowed) {
-      return { ok: false, code: 'RATE_LIMITED' };
+    const limit = this.limiter.consume('token-verify', meta.ip);
+    if (!limit.allowed) {
+      return { ok: false, code: 'RATE_LIMITED', retryAfterSec: limit.retryAfterSec };
     }
     const invalid = async (): Promise<ResetPasswordResult> => {
       await this.audit.record({
@@ -304,8 +321,9 @@ export class AuthService {
       ip: meta.ip,
       userAgent: meta.userAgent,
     };
-    if (!this.limiter.consume('token-verify', meta.ip).allowed) {
-      return { ok: false, code: 'RATE_LIMITED' };
+    const limit = this.limiter.consume('token-verify', meta.ip);
+    if (!limit.allowed) {
+      return { ok: false, code: 'RATE_LIMITED', retryAfterSec: limit.retryAfterSec };
     }
     const now = this.clock.now();
     const userId = await this.database.db.transaction(async (tx) => {
