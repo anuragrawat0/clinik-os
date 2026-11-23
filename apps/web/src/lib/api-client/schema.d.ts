@@ -180,6 +180,230 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{orgId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["OrganizationController_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["OrganizationController_update"];
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/branches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["OrganizationController_listBranches"];
+        put?: never;
+        post: operations["OrganizationController_createBranch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/branches/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["OrganizationController_getBranch"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["OrganizationController_updateBranch"];
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["OrganizationController_listMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["OrganizationController_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/invitations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["OrganizationController_revokeInvitation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/members/{userId}/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["OrganizationController_replaceRoles"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/members/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["OrganizationController_removeMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/ownership-transfer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["OrganizationController_transferOwnership"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/organizations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["PlatformAdminController_list"];
+        put?: never;
+        post: operations["PlatformAdminController_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/organizations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["PlatformAdminController_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["PlatformAdminController_update"];
+        trace?: never;
+    };
+    "/api/v1/admin/organizations/{id}/suspend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["PlatformAdminController_suspend"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/organizations/{id}/reactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["PlatformAdminController_reactivate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/organizations/{id}/owner-invitation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["PlatformAdminController_inviteOwner"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -269,6 +493,159 @@ export interface components {
             fullName?: string;
             /** Format: password */
             password?: string;
+        };
+        OrganizationDto: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            status: "active" | "suspended";
+            slug: string;
+            defaultTimezone: string;
+            currency: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        UpdateOrganizationDto: {
+            name?: string;
+            defaultTimezone?: string;
+        };
+        BranchDto: {
+            phone?: string | null;
+            /** Format: email */
+            email?: string | null;
+            addressLine1?: string | null;
+            addressLine2?: string | null;
+            city?: string | null;
+            region?: string | null;
+            postalCode?: string | null;
+            country?: string | null;
+            name: string;
+            code: string;
+            timezone: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            organizationId: string;
+            /** @enum {string} */
+            status: "active" | "inactive";
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        CreateBranchDto: {
+            phone?: string | null;
+            /** Format: email */
+            email?: string | null;
+            addressLine1?: string | null;
+            addressLine2?: string | null;
+            city?: string | null;
+            region?: string | null;
+            postalCode?: string | null;
+            country?: string | null;
+            name: string;
+            code: string;
+            timezone: string;
+        };
+        UpdateBranchDto: {
+            phone?: string | null;
+            /** Format: email */
+            email?: string | null;
+            addressLine1?: string | null;
+            addressLine2?: string | null;
+            city?: string | null;
+            region?: string | null;
+            postalCode?: string | null;
+            country?: string | null;
+            name?: string;
+            code?: string;
+            timezone?: string;
+            /** @enum {string} */
+            status?: "active" | "inactive";
+        };
+        StaffAssignmentDto: {
+            /** @enum {string} */
+            role: "org_owner" | "org_admin" | "branch_manager" | "doctor" | "receptionist";
+            /** Format: uuid */
+            branchId?: string | null;
+        };
+        MemberDto: {
+            /** Format: uuid */
+            userId: string;
+            /** Format: email */
+            email: string;
+            fullName: string;
+            /** Format: date-time */
+            joinedAt: string;
+            roles: components["schemas"]["StaffAssignmentDto"][];
+        };
+        StaffInvitationDto: {
+            /** @enum {string} */
+            role: "org_owner" | "org_admin" | "branch_manager" | "doctor" | "receptionist";
+            /** Format: uuid */
+            branchId?: string | null;
+            /** Format: email */
+            email: string;
+        };
+        InvitationDeliveryDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            expiresAt: string;
+            /** @enum {string} */
+            emailDelivery: "sent" | "failed";
+        };
+        ReplaceRolesDto: {
+            roles: components["schemas"]["StaffAssignmentDto"][];
+        };
+        OwnershipTransferDto: {
+            /** Format: uuid */
+            newOwnerUserId: string;
+            /** Format: password */
+            currentPassword: string;
+        };
+        CreateOrganizationDto: {
+            name: string;
+            slug: string;
+            defaultTimezone: string;
+            /** Format: email */
+            ownerEmail?: string;
+            ownerFullName?: string;
+        };
+        ProvisionedOrganizationDto: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            status: "active" | "suspended";
+            slug: string;
+            defaultTimezone: string;
+            currency: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            ownerInvitation?: components["schemas"]["InvitationDeliveryDto"];
+        };
+        OrganizationSummaryDto: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            status: "active" | "suspended";
+        };
+        OrganizationPageDto: {
+            items: components["schemas"]["OrganizationSummaryDto"][];
+            /** Format: uuid */
+            nextCursor: string | null;
+        };
+        OwnerInvitationDto: {
+            /** Format: email */
+            email: string;
+            fullName?: string;
         };
     };
     responses: never;
@@ -589,6 +966,717 @@ export interface operations {
             };
             /** @description Account details or a policy-compliant password required */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationDto"];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateOrganizationDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationDto"];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_listBranches: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchDto"][];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_createBranch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateBranchDto"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchDto"];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Branch code already in use */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid timezone */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_getBranch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchDto"];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_updateBranch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateBranchDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchDto"];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Branch code already in use */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid timezone */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_listMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberDto"][];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StaffInvitationDto"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationDeliveryDto"];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Assignment already held or invitation pending */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Branch is inactive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_revokeInvitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_replaceRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplaceRolesDto"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_removeMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_transferOwnership: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OwnershipTransferDto"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Current password is incorrect */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    PlatformAdminController_list: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationPageDto"];
+                };
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    PlatformAdminController_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOrganizationDto"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProvisionedOrganizationDto"];
+                };
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Organization slug already in use */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    PlatformAdminController_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationDto"];
+                };
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    PlatformAdminController_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateOrganizationDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationDto"];
+                };
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    PlatformAdminController_suspend: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationDto"];
+                };
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    PlatformAdminController_reactivate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationDto"];
+                };
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    PlatformAdminController_inviteOwner: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OwnerInvitationDto"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationDeliveryDto"];
+                };
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Organization already has an owner */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

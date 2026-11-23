@@ -343,6 +343,911 @@
           "auth"
         ]
       }
+    },
+    "/api/v1/orgs/{orgId}": {
+      "get": {
+        "operationId": "OrganizationController_get",
+        "parameters": [
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      },
+      "patch": {
+        "operationId": "OrganizationController_update",
+        "parameters": [
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOrganizationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/branches": {
+      "get": {
+        "operationId": "OrganizationController_listBranches",
+        "parameters": [
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BranchDto"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      },
+      "post": {
+        "operationId": "OrganizationController_createBranch",
+        "parameters": [
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBranchDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          },
+          "409": {
+            "description": "Branch code already in use"
+          },
+          "422": {
+            "description": "Invalid timezone"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/branches/{id}": {
+      "get": {
+        "operationId": "OrganizationController_getBranch",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      },
+      "patch": {
+        "operationId": "OrganizationController_updateBranch",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBranchDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          },
+          "409": {
+            "description": "Branch code already in use"
+          },
+          "422": {
+            "description": "Invalid timezone"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/members": {
+      "get": {
+        "operationId": "OrganizationController_listMembers",
+        "parameters": [
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MemberDto"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/invitations": {
+      "post": {
+        "operationId": "OrganizationController_invite",
+        "parameters": [
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StaffInvitationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationDeliveryDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          },
+          "409": {
+            "description": "Assignment already held or invitation pending"
+          },
+          "422": {
+            "description": "Branch is inactive"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/invitations/{id}": {
+      "delete": {
+        "operationId": "OrganizationController_revokeInvitation",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/members/{userId}/roles": {
+      "put": {
+        "operationId": "OrganizationController_replaceRoles",
+        "parameters": [
+          {
+            "name": "userId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceRolesDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/members/{userId}": {
+      "delete": {
+        "operationId": "OrganizationController_removeMember",
+        "parameters": [
+          {
+            "name": "userId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/orgs/{orgId}/ownership-transfer": {
+      "post": {
+        "operationId": "OrganizationController_transferOwnership",
+        "parameters": [
+          {
+            "name": "orgId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnershipTransferDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": "Permission denied"
+          },
+          "404": {
+            "description": "Resource unavailable"
+          },
+          "422": {
+            "description": "Current password is incorrect"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/v1/admin/organizations": {
+      "post": {
+        "operationId": "PlatformAdminController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrganizationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvisionedOrganizationDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable"
+          },
+          "409": {
+            "description": "Organization slug already in use"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "platform-admin"
+        ]
+      },
+      "get": {
+        "operationId": "PlatformAdminController_list",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationPageDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "platform-admin"
+        ]
+      }
+    },
+    "/api/v1/admin/organizations/{id}": {
+      "get": {
+        "operationId": "PlatformAdminController_get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "platform-admin"
+        ]
+      },
+      "patch": {
+        "operationId": "PlatformAdminController_update",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOrganizationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "platform-admin"
+        ]
+      }
+    },
+    "/api/v1/admin/organizations/{id}/suspend": {
+      "post": {
+        "operationId": "PlatformAdminController_suspend",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "platform-admin"
+        ]
+      }
+    },
+    "/api/v1/admin/organizations/{id}/reactivate": {
+      "post": {
+        "operationId": "PlatformAdminController_reactivate",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "platform-admin"
+        ]
+      }
+    },
+    "/api/v1/admin/organizations/{id}/owner-invitation": {
+      "post": {
+        "operationId": "PlatformAdminController_inviteOwner",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerInvitationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationDeliveryDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable"
+          },
+          "409": {
+            "description": "Organization already has an owner"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          }
+        ],
+        "tags": [
+          "platform-admin"
+        ]
+      }
     }
   },
   "info": {
@@ -662,6 +1567,535 @@
             "maxLength": 1024
           }
         }
+      },
+      "OrganizationDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "suspended"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "defaultTimezone": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "slug",
+          "defaultTimezone",
+          "currency",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "UpdateOrganizationDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "defaultTimezone": {
+            "type": "string"
+          }
+        }
+      },
+      "BranchDto": {
+        "type": "object",
+        "properties": {
+          "phone": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "nullable": true
+          },
+          "addressLine1": {
+            "type": "string",
+            "nullable": true
+          },
+          "addressLine2": {
+            "type": "string",
+            "nullable": true
+          },
+          "city": {
+            "type": "string",
+            "nullable": true
+          },
+          "region": {
+            "type": "string",
+            "nullable": true
+          },
+          "postalCode": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z0-9-]{2,16}$"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "organizationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "inactive"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "name",
+          "code",
+          "timezone",
+          "id",
+          "organizationId",
+          "status",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "CreateBranchDto": {
+        "type": "object",
+        "properties": {
+          "phone": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "nullable": true
+          },
+          "addressLine1": {
+            "type": "string",
+            "nullable": true
+          },
+          "addressLine2": {
+            "type": "string",
+            "nullable": true
+          },
+          "city": {
+            "type": "string",
+            "nullable": true
+          },
+          "region": {
+            "type": "string",
+            "nullable": true
+          },
+          "postalCode": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z0-9-]{2,16}$"
+          },
+          "timezone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "code",
+          "timezone"
+        ]
+      },
+      "UpdateBranchDto": {
+        "type": "object",
+        "properties": {
+          "phone": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "nullable": true
+          },
+          "addressLine1": {
+            "type": "string",
+            "nullable": true
+          },
+          "addressLine2": {
+            "type": "string",
+            "nullable": true
+          },
+          "city": {
+            "type": "string",
+            "nullable": true
+          },
+          "region": {
+            "type": "string",
+            "nullable": true
+          },
+          "postalCode": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z0-9-]{2,16}$"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "inactive"
+            ]
+          }
+        }
+      },
+      "StaffAssignmentDto": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "org_owner",
+              "org_admin",
+              "branch_manager",
+              "doctor",
+              "receptionist"
+            ]
+          },
+          "branchId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          }
+        },
+        "required": [
+          "role"
+        ]
+      },
+      "MemberDto": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "joinedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StaffAssignmentDto"
+            }
+          }
+        },
+        "required": [
+          "userId",
+          "email",
+          "fullName",
+          "joinedAt",
+          "roles"
+        ]
+      },
+      "StaffInvitationDto": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "org_owner",
+              "org_admin",
+              "branch_manager",
+              "doctor",
+              "receptionist"
+            ]
+          },
+          "branchId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          }
+        },
+        "required": [
+          "role",
+          "email"
+        ]
+      },
+      "InvitationDeliveryDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "emailDelivery": {
+            "type": "string",
+            "enum": [
+              "sent",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "expiresAt",
+          "emailDelivery"
+        ]
+      },
+      "ReplaceRolesDto": {
+        "type": "object",
+        "properties": {
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StaffAssignmentDto"
+            }
+          }
+        },
+        "required": [
+          "roles"
+        ]
+      },
+      "OwnershipTransferDto": {
+        "type": "object",
+        "properties": {
+          "newOwnerUserId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "currentPassword": {
+            "type": "string",
+            "format": "password",
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "newOwnerUserId",
+          "currentPassword"
+        ]
+      },
+      "CreateOrganizationDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"
+          },
+          "defaultTimezone": {
+            "type": "string"
+          },
+          "ownerEmail": {
+            "type": "string",
+            "format": "email"
+          },
+          "ownerFullName": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "name",
+          "slug",
+          "defaultTimezone"
+        ]
+      },
+      "ProvisionedOrganizationDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "suspended"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "defaultTimezone": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ownerInvitation": {
+            "$ref": "#/components/schemas/InvitationDeliveryDto"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "slug",
+          "defaultTimezone",
+          "currency",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "OrganizationSummaryDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "suspended"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status"
+        ]
+      },
+      "OrganizationPageDto": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrganizationSummaryDto"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ]
+      },
+      "OwnerInvitationDto": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "fullName": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "email"
+        ]
       }
     }
   }

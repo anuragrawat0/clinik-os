@@ -57,14 +57,44 @@ export class AuthMailer {
       const template = templates[purpose];
       const url = new URL(template.path, this.config.APP_BASE_URL);
       url.searchParams.set('token', rawToken);
-      await this.transport.sendMail({
-        from: this.config.MAIL_FROM,
-        to: { name: '', address: to },
-        subject: template.subject,
-        text: `${template.message}\n\n${url.toString()}\n\nIf you did not request this, you can ignore this email.\n`,
-      });
+      await this.deliver(to, '', template.subject, template.message, url);
     } catch {
       logger.warn('An authentication email could not be sent.');
     }
+  }
+
+  async sendInvitation(
+    email: string,
+    fullName: string | undefined,
+    token: string,
+  ): Promise<'sent' | 'failed'> {
+    try {
+      await this.deliver(
+        email,
+        fullName ?? '',
+        'Your Clinik OS invitation',
+        'Open this link to accept your invitation. It expires in 7 days.',
+        new URL(`/invite/${token}`, this.config.APP_BASE_URL),
+      );
+      return 'sent';
+    } catch {
+      logger.warn('An authentication email could not be sent.');
+      return 'failed';
+    }
+  }
+
+  private async deliver(
+    to: string,
+    name: string,
+    subject: string,
+    message: string,
+    url: URL,
+  ): Promise<void> {
+    await this.transport.sendMail({
+      from: this.config.MAIL_FROM,
+      to: { name, address: to },
+      subject,
+      text: `${message}\n\n${url.toString()}\n\nIf you did not request this, you can ignore this email.\n`,
+    });
   }
 }

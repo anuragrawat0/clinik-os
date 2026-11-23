@@ -6,6 +6,7 @@ import { ModulesContainer } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { PLATFORM_ADMIN, REQUIRED_PERMISSION } from '../../src/core/access/access';
 import { IS_PUBLIC_KEY } from '../../src/core/auth/public.decorator';
 import {
   collectMountedRoutes,
@@ -33,6 +34,12 @@ const ALLOWED_PUBLIC_ROUTES = [
  * proves that. Nothing else may be mounted outside the controllers.
  */
 const FRAMEWORK_ROUTES = ['_ALL <nested>*path'];
+const AUTHENTICATED_ROUTES = [
+  'GET /api/v1/auth/me',
+  'POST /api/v1/auth/logout',
+  'GET /api/v1/auth/sessions',
+  'DELETE /api/v1/auth/sessions/:id',
+];
 
 /**
  * Test-only controller added to the REAL application wiring. It is neither @Public nor guarded
@@ -53,6 +60,9 @@ interface RouteInfo {
   method: string;
   path: string;
   isPublic: boolean;
+  permission?: unknown;
+  platformAdmin: boolean;
+  probe: boolean;
 }
 
 const methodNames: Record<number, string> = {
@@ -121,6 +131,13 @@ describe('route coverage: every route is @Public or behind SessionGuard', () => 
             method: methodNames[method] ?? String(method),
             path: joinPath('api/v1', controllerPath ?? '', methodPath),
             isPublic,
+            permission:
+              Reflect.getMetadata(REQUIRED_PERMISSION, handler) ??
+              Reflect.getMetadata(REQUIRED_PERMISSION, controller),
+            platformAdmin:
+              Reflect.getMetadata(PLATFORM_ADMIN, handler) === true ||
+              Reflect.getMetadata(PLATFORM_ADMIN, controller) === true,
+            probe: controller === ProbeController,
           });
         }
       }
@@ -162,6 +179,21 @@ describe('route coverage: every route is @Public or behind SessionGuard', () => 
       .filter((route) => route.isPublic)
       .map((route) => `${route.method} ${route.path}`);
     expect(publicRoutes.sort()).toEqual([...ALLOWED_PUBLIC_ROUTES].sort());
+  });
+
+  it('every protected route declares the access policy appropriate to its prefix', () => {
+    const routesWithoutPolicy = routes.filter(
+      (route) => !route.isPublic && !route.probe && !route.permission && !route.platformAdmin,
+    );
+    expect(routesWithoutPolicy.map(({ method, path }) => `${method} ${path}`).sort()).toEqual(
+      [...AUTHENTICATED_ROUTES].sort(),
+    );
+    const platformRoutes = routes.filter((route) => route.path.startsWith('/api/v1/admin/'));
+    const orgRoutes = routes.filter((route) => route.path.startsWith('/api/v1/orgs/'));
+    expect(platformRoutes.length).toBeGreaterThan(0);
+    expect(orgRoutes.length).toBeGreaterThan(0);
+    for (const route of platformRoutes) expect(route.platformAdmin, route.path).toBe(true);
+    for (const route of orgRoutes) expect(route.permission, route.path).toBeDefined();
   });
 
   it('every non-public route answers 401 UNAUTHENTICATED without a session', async () => {
