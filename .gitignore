@@ -15,5 +15,3 @@ coverage/
 *.log
 .corepack-cache/
 .corepack-bin/
-docs/
-AGENTS.md
