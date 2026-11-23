@@ -1,0 +1,968 @@
+import 'reflect-metadata';
+import { randomBytes } from 'node:crypto';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type { INestApplication } from '@nestjs/common';
+import type { OpenAPIObject } from '@nestjs/swagger';
+import { Test } from '@nestjs/testing';
+import { Pool, type PoolClient } from 'pg';
+import request from 'supertest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuditWriter } from '../../src/core/audit';
+import { PasswordService, SessionService, TokenService } from '../../src/modules/identity/core';
+import { AUTH_MAIL_TRANSPORT } from '../../src/modules/notifications/auth-mailer';
+import {
+  type DatabaseHarness,
+  organizationA,
+  organizationB,
+  startDatabaseHarness,
+} from '../db/harness';
+
+/**
+ * Independent review tests for M1b slice 2 (tenancy, provisioning, access core).
+ *
+ * These tests exercise:
+ *  - P1: Organization write locks are compatible with FK inserts and unrelated writes.
+ *  - P2: the request transaction closes on every failure path.
+ *  - P3: branch scope is enforced in services.
+ *  - P5(b): ownership transfer reauthentication is tracked per session.
+ *
+ * Tests marked "EXPECTED DESIGN" fail against 41ec759 and should start passing after a fix.
+ */
+
+const branchA = '20000000-0000-0000-0000-000000000001';
+const otherBranch = '20000000-0000-0000-0000-000000000002';
+const foreignBranch = '20000000-0000-0000-0000-000000000003';
+const orgPath = `/api/v1/orgs/${organizationA}`;
+const password = 'Synthetic-staff-passphrase-27';
+const fullName = 'Synthetic Reviewer';
+const writeHeaders = {
+  'X-Requested-With': 'XMLHttpRequest',
+  'X-Request-Id': 'slice2-review',
+};
+
+const ownerRole = { role: 'org_owner', branchId: null } as const;
+const adminRole = { role: 'org_admin', branchId: null } as const;
+const managerRole = { role: 'branch_manager', branchId: branchA } as const;
+const doctorA = { role: 'doctor', branchId: branchA } as const;
+const doctorB = { role: 'doctor', branchId: otherBranch } as const;
+
+type Method = 'get' | 'post' | 'patch' | 'put' | 'delete';
+
+let harness: DatabaseHarness;
+let app: INestApplication;
+let document: OpenAPIObject;
+let port: number;
+let passwordHash: string;
+let tokens: TokenService;
+let superuser: Pool;
+let usersCreated = 0;
+
+function httpClient() {
+  return request(app.getHttpServer());
+}
+
+function call(method: Method, path: string, cookie?: string) {
+  const req = httpClient()[method](path).set(writeHeaders);
+  return cookie ? req.set('Cookie', cookie) : req;
+}
+
+async function createUser(): Promise<{ id: string; email: string }> {
+  const email = `synthetic.review.${++usersCreated}@clinik.test`;
+  const result = await harness.adminPool.query<{ id: string }>(
+    'INSERT INTO users (email, password_hash, full_name, status) VALUES ($1, $2, $3, $4) RETURNING id',
+    [email, passwordHash, fullName, 'active'],
+  );
+  return { id: result.rows[0].id, email };
+}
+
+async function member(
+  options: {
+    orgId?: string;
+    roles?: readonly { role: string; branchId: string | null }[];
+    platform?: boolean;
+  } = {},
+) {
+  const user = await createUser();
+  if (options.platform)
+    await harness.adminPool.query('UPDATE users SET is_platform_admin = true WHERE id = $1', [
+      user.id,
+    ]);
+  if (options.orgId) {
+    await harness.adminPool.query(
+      'INSERT INTO organization_members (organization_id, user_id) VALUES ($1, $2)',
+      [options.orgId, user.id],
+    );
+    for (const { role, branchId } of options.roles ?? []) {
+      await harness.adminPool.query(
+        'INSERT INTO staff_role_assignments (organization_id, user_id, role, branch_id) VALUES ($1, $2, $3, $4)',
+        [options.orgId, user.id, role, branchId],
+      );
+    }
+  }
+  const { rawToken } = await app.get(SessionService).create(user.id, {
+    ip: null,
+    userAgent: null,
+    requestId: null,
+  });
+  return { ...user, cookie: `__Host-session=${rawToken}` };
+}
+
+async function directInvitation(input: {
+  orgId?: string;
+  email: string;
+  role: string;
+  branchId: string | null;
+  invitedBy: string;
+  expiresAt?: Date;
+}): Promise<{ id: string; path: string; rawToken: string }> {
+  const token = tokens.generate();
+  const result = await harness.adminPool.query<{ id: string }>(
+    `INSERT INTO invitations (organization_id, email, role, branch_id, token_hash, invited_by, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [
+      input.orgId ?? organizationA,
+      input.email,
+      input.role,
+      input.branchId,
+      token.hash,
+      input.invitedBy,
+      input.expiresAt ?? new Date(Date.now() + 60 * 60 * 1000),
+    ],
+  );
+  return {
+    id: result.rows[0].id,
+    path: `/api/v1/auth/invitations/${input.orgId ?? organizationA}.${token.raw}`,
+    rawToken: token.raw,
+  };
+}
+
+async function pidsBlockedBy(blockerPid: number): Promise<number[]> {
+  const { rows } = await harness.adminPool.query<{ pid: number }>(
+    `SELECT pid FROM pg_stat_activity
+     WHERE application_name = 'clinik-api' AND $1 = ANY(pg_blocking_pids(pid))`,
+    [blockerPid],
+  );
+  return rows.map(({ pid }) => pid);
+}
+
+async function waitForBlockedBy(blockerPid: number): Promise<number> {
+  return vi.waitFor(
+    async () => {
+      const pids = await pidsBlockedBy(blockerPid);
+      expect(pids).toHaveLength(1);
+      return pids[0];
+    },
+    { timeout: 10_000, interval: 25 },
+  );
+}
+
+async function beginAuditHold(): Promise<{ gate: PoolClient; gatePid: number }> {
+  const gate = await harness.adminPool.connect();
+  await gate.query('BEGIN');
+  await gate.query('LOCK TABLE audit_logs IN ACCESS EXCLUSIVE MODE');
+  const { rows } = await gate.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  return { gate, gatePid: rows[0].pid };
+}
+
+async function releaseHold(gate: PoolClient): Promise<void> {
+  try {
+    await gate.query('ROLLBACK');
+  } finally {
+    gate.release();
+  }
+}
+
+async function idleInTransaction(): Promise<number> {
+  const { rows } = await harness.adminPool.query<{ count: number }>(
+    `SELECT count(*)::integer AS count FROM pg_stat_activity
+     WHERE application_name = 'clinik-api' AND state IN ('idle in transaction', 'idle in transaction (aborted)')`,
+  );
+  return rows[0].count;
+}
+
+async function auditRowsForOrg() {
+  const { rows } = await harness.adminPool.query(
+    `SELECT action, organization_id, metadata, changed_fields FROM audit_logs
+     WHERE organization_id IS NOT NULL ORDER BY id`,
+  );
+  return rows;
+}
+
+beforeAll(async () => {
+  harness = await startDatabaseHarness();
+  vi.stubEnv('DATABASE_URL', harness.connectionString('clinic_app'));
+  vi.stubEnv('TRUSTED_PROXY_CIDRS', '');
+  const { AppModule } = await import('../../src/app.module');
+  const { configureHttpApp } = await import('../../src/http-app');
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(AUTH_MAIL_TRANSPORT)
+    .useValue({ sendMail: async () => undefined })
+    .compile();
+  app = moduleRef.createNestApplication();
+  document = configureHttpApp(app);
+  await app.init();
+  await app.listen(0);
+  port = (app.getHttpServer().address() as AddressInfo).port;
+  passwordHash = await app.get(PasswordService).hash(password);
+  tokens = app.get(TokenService);
+  superuser = new Pool({ connectionString: harness.container.getConnectionUri(), max: 2 });
+}, 180_000);
+
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  await superuser?.end();
+  await app?.close();
+  await harness?.stop();
+});
+
+beforeEach(async () => {
+  await harness.adminPool.query('TRUNCATE users, organizations, audit_logs CASCADE');
+  await harness.adminPool.query(
+    `INSERT INTO organizations (id, name, slug) VALUES
+       ($1, 'Clinic A', 'clinic-a'), ($2, 'Clinic B', 'clinic-b')`,
+    [organizationA, organizationB],
+  );
+  await harness.adminPool.query(
+    `INSERT INTO branches (id, organization_id, name, code, timezone) VALUES
+       ($1, $3, 'Main Branch', 'MAIN', 'UTC'),
+       ($2, $3, 'North Branch', 'NORTH', 'UTC'),
+       ($4, $5, 'Foreign Branch', 'FOREIGN', 'UTC')`,
+    [branchA, otherBranch, organizationA, foreignBranch, organizationB],
+  );
+});
+
+describe('P1: organization locking', () => {
+  it('an unrelated FK insert must not block while a role write holds the organization lock', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA });
+    const { gate, gatePid } = await beginAuditHold();
+    const first = call('put', `${orgPath}/members/${target.id}/roles`, owner.cookie).send({
+      roles: [doctorA],
+    });
+    first.catch(() => undefined);
+    const fk = await superuser.connect();
+    try {
+      await waitForBlockedBy(gatePid);
+      await fk.query('BEGIN');
+      await fk.query("SET LOCAL lock_timeout = '750ms'");
+      const inserted = await fk.query(
+        `INSERT INTO branches (organization_id, name, code, timezone)
+         VALUES ($1, 'Inserted while locked', 'LOCKED', 'UTC')`,
+        [organizationA],
+      );
+      expect(inserted.rowCount).toBe(1);
+    } finally {
+      await fk.query('ROLLBACK').catch(() => undefined);
+      fk.release();
+      await releaseHold(gate);
+      await first;
+    }
+    expect((await first).status).toBe(204);
+  }, 30_000);
+
+  it('two unrelated tenant writes in one org must not serialize', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const { gate, gatePid } = await beginAuditHold();
+    const first = call('patch', orgPath, owner.cookie).send({ name: 'First write' });
+    first.catch(() => undefined);
+    const second = call('post', `${orgPath}/branches`, owner.cookie).send({
+      name: 'Second branch',
+      code: `SECOND${randomBytes(3).toString('hex').toUpperCase()}`,
+      timezone: 'UTC',
+    });
+    second.catch(() => undefined);
+    try {
+      await vi.waitFor(async () => expect(await pidsBlockedBy(gatePid)).toHaveLength(2), {
+        timeout: 10_000,
+        interval: 25,
+      });
+    } finally {
+      await releaseHold(gate);
+    }
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(201);
+  }, 30_000);
+
+  it('EXPECTED DESIGN: an FK insert must not block behind an organization settings update', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const { gate, gatePid } = await beginAuditHold();
+    const first = call('patch', orgPath, owner.cookie).send({ name: 'Locked write' });
+    first.catch(() => undefined);
+    const fk = await superuser.connect();
+    let code: string | undefined;
+    try {
+      await waitForBlockedBy(gatePid);
+      await fk.query('BEGIN');
+      await fk.query("SET LOCAL lock_timeout = '750ms'");
+      try {
+        await fk.query(
+          `INSERT INTO branches (organization_id, name, code, timezone)
+           VALUES ($1, 'Expected design insert', 'EXPECTED', 'UTC')`,
+          [organizationA],
+        );
+      } catch (error) {
+        code = (error as { code?: string }).code;
+      } finally {
+        await fk.query('ROLLBACK').catch(() => undefined);
+      }
+    } finally {
+      fk.release();
+      await releaseHold(gate);
+      await first;
+    }
+    // FOR NO KEY UPDATE (expected) does not conflict with the FK's FOR KEY SHARE.
+    expect(code).toBeUndefined();
+  }, 30_000);
+
+  it.each([
+    { change: 'suspension', expected: 404 },
+    { change: 'role removal', expected: 403 },
+  ])(
+    'rechecks actor access after waiting for concurrent $change',
+    async ({ change, expected }) => {
+      const admin = await member({ orgId: organizationA, roles: [adminRole] });
+      const target = await member({ orgId: organizationA });
+      const gate = await harness.adminPool.connect();
+      try {
+        await gate.query('BEGIN');
+        await gate.query('SELECT id FROM organizations WHERE id = $1 FOR NO KEY UPDATE', [
+          organizationA,
+        ]);
+        const {
+          rows: [gateInfo],
+        } = await gate.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+        const update = Promise.resolve(
+          call('put', `${orgPath}/members/${target.id}/roles`, admin.cookie).send({
+            roles: [doctorA],
+          }),
+        );
+        void update.catch(() => undefined);
+        try {
+          await waitForBlockedBy(gateInfo.pid);
+          if (change === 'suspension') {
+            await gate.query(
+              "UPDATE organization_members SET status = 'suspended' WHERE organization_id = $1 AND user_id = $2",
+              [organizationA, admin.id],
+            );
+          }
+          await gate.query(
+            'DELETE FROM staff_role_assignments WHERE organization_id = $1 AND user_id = $2',
+            [organizationA, admin.id],
+          );
+          await gate.query('COMMIT');
+          expect((await update).status).toBe(expected);
+        } finally {
+          await gate.query('ROLLBACK');
+          await update.catch(() => undefined);
+        }
+      } finally {
+        gate.release();
+      }
+      expect(await auditRowsForOrg()).toEqual([]);
+    },
+    30_000,
+  );
+});
+
+describe('P2: the request transaction closes on every path', () => {
+  it('releases the transaction after a zod 400 burst, a permission 403 burst and a handler conflict', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const doctor = await member({ orgId: organizationA, roles: [doctorA] });
+
+    const invalid = await Promise.all(
+      Array.from({ length: 15 }, () => call('patch', orgPath, owner.cookie).send({})),
+    );
+    expect(invalid.map(({ status }) => status)).toEqual(Array(15).fill(400));
+
+    const forbidden = await Promise.all(
+      Array.from({ length: 15 }, () =>
+        call('post', `${orgPath}/branches`, doctor.cookie).send({
+          name: 'Forbidden branch',
+          code: 'FORBIDDEN',
+          timezone: 'UTC',
+        }),
+      ),
+    );
+    expect(forbidden.map(({ status }) => status)).toEqual(Array(15).fill(403));
+
+    const conflicts = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        call('post', `${orgPath}/branches`, owner.cookie).send({
+          name: 'Duplicate',
+          code: 'MAIN',
+          timezone: 'UTC',
+        }),
+      ),
+    );
+    expect(conflicts.map(({ status }) => status)).toEqual(Array(10).fill(409));
+
+    const started = Date.now();
+    await call('get', orgPath, owner.cookie).timeout({ response: 2000 }).expect(200);
+    expect(Date.now() - started).toBeLessThan(2000);
+    await vi.waitFor(async () => expect(await idleInTransaction()).toBe(0), { timeout: 5_000 });
+  }, 60_000);
+
+  it('closes the transaction when the client aborts a held request', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const { gate, gatePid } = await beginAuditHold();
+    const body = JSON.stringify({ name: 'Aborted write' });
+    const aborted = http.request({
+      host: '127.0.0.1',
+      port,
+      path: `${orgPath}`,
+      method: 'PATCH',
+      headers: {
+        ...writeHeaders,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        Cookie: owner.cookie,
+      },
+    });
+    aborted.on('error', () => undefined);
+    try {
+      aborted.write(body);
+      aborted.end();
+      await waitForBlockedBy(gatePid);
+      aborted.destroy();
+    } finally {
+      await releaseHold(gate);
+    }
+    await vi.waitFor(async () => expect(await idleInTransaction()).toBe(0), { timeout: 10_000 });
+    const started = Date.now();
+    await call('get', orgPath, owner.cookie).timeout({ response: 2000 }).expect(200);
+    expect(Date.now() - started).toBeLessThan(2000);
+  }, 30_000);
+});
+
+describe('P3: branch scope', () => {
+  it('enforces branch scope on invite, revoke, branch PATCH, member list, roles and removal', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const branchBMember = await member({ orgId: organizationA, roles: [doctorB] });
+    const target = await member({ orgId: organizationA });
+
+    const members = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
+    expect(members.body.map(({ userId }: { userId: string }) => userId)).not.toContain(
+      branchBMember.id,
+    );
+
+    await call('post', `${orgPath}/invitations`, manager.cookie)
+      .send({ email: 'branch-b-invite@clinik.test', ...doctorB })
+      .expect(403);
+    const invite = await directInvitation({
+      email: 'revoke-branch-b@clinik.test',
+      role: 'doctor',
+      branchId: otherBranch,
+      invitedBy: owner.id,
+    });
+    await call('delete', `${orgPath}/invitations/${invite.id}`, manager.cookie).expect(403);
+    await call('patch', `${orgPath}/branches/${otherBranch}`, manager.cookie)
+      .send({ name: 'Out of scope' })
+      .expect(403);
+    await call('put', `${orgPath}/members/${target.id}/roles`, manager.cookie)
+      .send({ roles: [doctorB] })
+      .expect(403);
+    await call('delete', `${orgPath}/members/${branchBMember.id}`, manager.cookie).expect(403);
+  }, 30_000);
+
+  it('EXPECTED DESIGN: a branch manager must not see roles from unmanaged branches', async () => {
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const target = await member({
+      orgId: organizationA,
+      roles: [doctorA, doctorB],
+    });
+    const members = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
+    const entry = members.body.find(({ userId }: { userId: string }) => userId === target.id);
+    expect(entry?.roles).toEqual([doctorA]);
+  }, 30_000);
+
+  it('EXPECTED DESIGN: replacing roles must reject a role on an inactive branch', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA });
+    await call('patch', `${orgPath}/branches/${otherBranch}`, owner.cookie)
+      .send({ status: 'inactive' })
+      .expect(200);
+    const response = await call('put', `${orgPath}/members/${target.id}/roles`, owner.cookie).send({
+      roles: [doctorB],
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.code).toBe('BRANCH_INACTIVE');
+  }, 30_000);
+
+  it('retains an inactive-branch assignment while adding a role on an active branch', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const receptionist = { role: 'receptionist', branchId: branchA };
+    const target = await member({ orgId: organizationA, roles: [doctorB, receptionist] });
+    const newBranch = await call('post', `${orgPath}/branches`, owner.cookie)
+      .send({ name: 'Another active branch', code: 'ANOTHER', timezone: 'UTC' })
+      .expect(201);
+    await call('patch', `${orgPath}/branches/${otherBranch}`, owner.cookie)
+      .send({ status: 'inactive' })
+      .expect(200);
+    const roles = [doctorB, receptionist, { role: 'doctor', branchId: newBranch.body.id }];
+    await call('put', `${orgPath}/members/${target.id}/roles`, owner.cookie)
+      .send({ roles })
+      .expect(204);
+    const response = await call('get', `${orgPath}/members`, owner.cookie).expect(200);
+    const entry = response.body.find(({ userId }: { userId: string }) => userId === target.id);
+    expect(entry.roles).toHaveLength(3);
+    expect(entry.roles).toEqual(expect.arrayContaining(roles));
+  }, 30_000);
+
+  it('rechecks branch activity if a deactivation is already in progress', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA });
+    const gate = await harness.adminPool.connect();
+    try {
+      await gate.query('BEGIN');
+      await gate.query("UPDATE branches SET status = 'inactive' WHERE id = $1", [otherBranch]);
+      const {
+        rows: [gateInfo],
+      } = await gate.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const replace = Promise.resolve(
+        call('put', `${orgPath}/members/${target.id}/roles`, owner.cookie).send({
+          roles: [doctorB],
+        }),
+      );
+      void replace.catch(() => undefined);
+      try {
+        await waitForBlockedBy(gateInfo.pid);
+        await gate.query('COMMIT');
+        const result = await replace;
+        expect(result.status).toBe(422);
+        expect(result.body.code).toBe('BRANCH_INACTIVE');
+      } finally {
+        await gate.query('ROLLBACK');
+        await replace.catch(() => undefined);
+      }
+    } finally {
+      gate.release();
+    }
+    expect(await auditRowsForOrg()).toEqual([]);
+  }, 30_000);
+});
+
+describe('grant and escalation negatives', () => {
+  it('no tenant route can grant org_owner or org_admin outside the platform owner-invite endpoint', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const admin = await member({ orgId: organizationA, roles: [adminRole] });
+    const target = await member({ orgId: organizationA });
+    await call('post', `${orgPath}/invitations`, owner.cookie)
+      .send({ email: 'owner-through-invite@clinik.test', role: 'org_owner', branchId: null })
+      .expect(403);
+    await call('put', `${orgPath}/members/${target.id}/roles`, owner.cookie)
+      .send({ roles: [{ role: 'org_owner', branchId: null }] })
+      .expect(403);
+    await call('post', `${orgPath}/invitations`, admin.cookie)
+      .send({ email: 'admin-through-invite@clinik.test', role: 'org_admin', branchId: null })
+      .expect(403);
+    await call('put', `${orgPath}/members/${target.id}/roles`, admin.cookie)
+      .send({ roles: [adminRole] })
+      .expect(403);
+  }, 30_000);
+});
+
+describe('P5(b) ownership transfer with a wrong current password', () => {
+  it('audits failures per session and revokes only the fifth-failure session', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [adminRole] });
+    const sessions = app.get(SessionService);
+    const original = await sessions.validate(owner.cookie.split('=')[1]);
+    if (original.status !== 'valid') throw new Error('Expected a valid test session');
+    const other = await sessions.create(owner.id, { ip: null, userAgent: null });
+    const otherCookie = `__Host-session=${other.rawToken}`;
+    const transfer = (cookie: string, currentPassword = 'wrong-review-password') =>
+      call('post', `${orgPath}/ownership-transfer`, cookie).send({
+        newOwnerUserId: target.id,
+        currentPassword,
+      });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const response = await transfer(owner.cookie).expect(422);
+      expect(response.body.code).toBe('INVALID_PASSWORD');
+    }
+    await transfer(otherCookie).expect(422);
+    const denied = await transfer(owner.cookie).expect(401);
+    expect(denied.body.code).toBe('UNAUTHENTICATED');
+    await transfer(owner.cookie, password).expect(401);
+    await call('get', '/api/v1/auth/me', otherCookie).expect(200);
+    const { rows } = await harness.adminPool.query(
+      'SELECT failed_login_count, locked_until FROM users WHERE id = $1',
+      [owner.id],
+    );
+    expect(rows).toEqual([{ failed_login_count: 0, locked_until: null }]);
+    const audits = await harness.adminPool.query(
+      'SELECT action, outcome, organization_id, actor_user_id, resource_id, metadata FROM audit_logs ORDER BY id',
+    );
+    expect(audits.rows).toEqual([
+      ...Array.from({ length: 6 }, () => ({
+        action: 'org.ownership_transfer.denied',
+        outcome: 'denied',
+        organization_id: organizationA,
+        actor_user_id: owner.id,
+        resource_id: organizationA,
+        metadata: {},
+      })),
+      {
+        action: 'auth.session.revoked',
+        outcome: 'success',
+        organization_id: null,
+        actor_user_id: owner.id,
+        resource_id: original.context.sessionId,
+        metadata: { reason: 'reauth_failed' },
+      },
+    ]);
+  }, 60_000);
+
+  it('persists denials independently and preserves the count when audit or revocation fails', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [adminRole] });
+    const transfer = () =>
+      call('post', `${orgPath}/ownership-transfer`, owner.cookie).send({
+        newOwnerUserId: target.id,
+        currentPassword: 'incorrect',
+      });
+    const audit = vi.spyOn(AuditWriter.prototype, 'record');
+    const revoke = vi.spyOn(app.get(SessionService), 'revoke');
+    try {
+      audit.mockRejectedValueOnce(new Error('Synthetic audit write failure'));
+      await transfer().expect(500);
+      expect(await auditRowsForOrg()).toEqual([]);
+      for (let attempt = 0; attempt < 4; attempt += 1) await transfer().expect(422);
+      expect(revoke).not.toHaveBeenCalled();
+      revoke.mockRejectedValueOnce(new Error('Synthetic session write failure'));
+      await transfer().expect(500);
+      await call('get', orgPath, owner.cookie).expect(200);
+      expect(await auditRowsForOrg()).toHaveLength(5);
+      await transfer().expect(401);
+      await call('get', orgPath, owner.cookie).expect(401);
+      expect(await auditRowsForOrg()).toHaveLength(6);
+      const denials = audit.mock.calls.filter(
+        ([event]) => event.action === 'org.ownership_transfer.denied',
+      );
+      expect(denials).toHaveLength(7);
+      expect(denials.every((args) => args.length === 1)).toBe(true);
+      expect(revoke).toHaveBeenCalledTimes(2);
+      expect(revoke.mock.calls.every((args) => args.length === 2)).toBe(true);
+    } finally {
+      audit.mockRestore();
+      revoke.mockRestore();
+    }
+  }, 30_000);
+
+  it('audits every concurrent failure and revokes at five', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [adminRole] });
+    const service = app.get(PasswordService);
+    const verifyPassword = service.verify.bind(service);
+    let resume!: () => void;
+    const pause = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const verify = vi.spyOn(service, 'verify').mockImplementation(async (hash, plain) => {
+      await pause;
+      return verifyPassword(hash, plain);
+    });
+    const pending = Promise.all(
+      Array.from({ length: 6 }, () =>
+        call('post', `${orgPath}/ownership-transfer`, owner.cookie).send({
+          newOwnerUserId: target.id,
+          currentPassword: 'wrong-concurrent-password',
+        }),
+      ),
+    );
+    void pending.catch(() => undefined);
+    try {
+      await vi.waitFor(() => expect(verify).toHaveBeenCalledTimes(6));
+    } finally {
+      resume();
+      verify.mockRestore();
+      await pending.catch(() => undefined);
+    }
+    const responses = await pending;
+    expect(responses.map(({ status }) => status).sort()).toEqual([401, 401, 422, 422, 422, 422]);
+    expect((await auditRowsForOrg()).map(({ action }) => action)).toEqual(
+      Array(6).fill('org.ownership_transfer.denied'),
+    );
+    await call('get', orgPath, owner.cookie).expect(401);
+  }, 30_000);
+
+  it('resets the failure count after a committed transfer', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [adminRole] });
+    const transfer = (cookie: string, newOwnerUserId: string, currentPassword: string) =>
+      call('post', `${orgPath}/ownership-transfer`, cookie).send({
+        newOwnerUserId,
+        currentPassword,
+      });
+    for (let attempt = 0; attempt < 4; attempt += 1)
+      await transfer(owner.cookie, target.id, 'incorrect').expect(422);
+    await transfer(owner.cookie, target.id, password).expect(204);
+    await transfer(target.cookie, owner.id, password).expect(204);
+    for (let attempt = 0; attempt < 4; attempt += 1)
+      await transfer(owner.cookie, target.id, 'incorrect').expect(422);
+    await transfer(owner.cookie, target.id, 'incorrect').expect(401);
+  }, 30_000);
+
+  it('verifies the current password without holding organization, user, or session row locks', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [adminRole] });
+    const service = app.get(PasswordService);
+    const verifyPassword = service.verify.bind(service);
+    let resume!: () => void;
+    const pause = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const verify = vi.spyOn(service, 'verify').mockImplementationOnce(async (hash, plain) => {
+      await pause;
+      return verifyPassword(hash, plain);
+    });
+    const first = Promise.resolve(
+      call('post', `${orgPath}/ownership-transfer`, owner.cookie).send({
+        newOwnerUserId: target.id,
+        currentPassword: password,
+      }),
+    );
+    void first.catch(() => undefined);
+    const gate = await superuser.connect();
+    try {
+      await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce());
+      await gate.query('BEGIN');
+      await gate.query('SELECT id FROM organizations WHERE id = $1 FOR NO KEY UPDATE NOWAIT', [
+        organizationA,
+      ]);
+      await gate.query('SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE NOWAIT', [owner.id]);
+      await gate.query('SELECT id FROM sessions WHERE user_id = $1 FOR NO KEY UPDATE NOWAIT', [
+        owner.id,
+      ]);
+    } finally {
+      await gate.query('ROLLBACK');
+      gate.release();
+      resume();
+      verify.mockRestore();
+      await first.catch(() => undefined);
+    }
+    expect((await first).status).toBe(204);
+  }, 30_000);
+});
+
+describe('invitation and transfer races', () => {
+  it('returns the generic 404 for an invitation accepted against a suspended org', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const invitation = await directInvitation({
+      email: 'suspended-org@clinik.test',
+      role: 'doctor',
+      branchId: branchA,
+      invitedBy: owner.id,
+    });
+    await harness.adminPool.query('UPDATE organizations SET status = $1 WHERE id = $2', [
+      'suspended',
+      organizationA,
+    ]);
+    const preview = await call('get', invitation.path).expect(404);
+    expect(preview.body.code).toBe('NOT_FOUND');
+    const accepted = await call('post', `${invitation.path}/accept`)
+      .send({ fullName, password })
+      .expect(404);
+    expect(accepted.body.code).toBe('NOT_FOUND');
+    await call('get', orgPath, owner.cookie).expect(404);
+    const me = await call('get', '/api/v1/auth/me', owner.cookie).expect(200);
+    expect(me.body.memberships).toEqual([]);
+  }, 30_000);
+
+  it("EXPECTED DESIGN: accepting a new-user invite must not revoke a different user's session", async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const bystander = await member({ orgId: organizationA, roles: [doctorA] });
+    const invitation = await directInvitation({
+      email: 'brand-new-account@clinik.test',
+      role: 'doctor',
+      branchId: branchA,
+      invitedBy: owner.id,
+    });
+    await harness.adminPool.query(
+      "UPDATE sessions SET last_seen_at = now() - interval '2 minutes' WHERE user_id = $1",
+      [bystander.id],
+    );
+    const bystanderSession = () =>
+      harness.adminPool.query(
+        'SELECT last_seen_at, idle_expires_at, revoked_at FROM sessions WHERE user_id = $1',
+        [bystander.id],
+      );
+    const before = await bystanderSession();
+    await call('post', `${invitation.path}/accept`, bystander.cookie)
+      .send({ fullName, password })
+      .expect(204);
+    expect((await bystanderSession()).rows).toEqual(before.rows);
+    await call('get', '/api/v1/auth/me', bystander.cookie).expect(200);
+  }, 30_000);
+
+  it('serializes an ownership transfer against removal of the target', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [adminRole] });
+    const [transfer, removal] = await Promise.all([
+      call('post', `${orgPath}/ownership-transfer`, owner.cookie).send({
+        newOwnerUserId: target.id,
+        currentPassword: password,
+      }),
+      call('delete', `${orgPath}/members/${target.id}`, owner.cookie),
+    ]);
+    expect([transfer.status, removal.status]).toContain(204);
+    expect(transfer.status === 204 ? removal.status : transfer.status).toBe(
+      transfer.status === 204 ? 403 : 404,
+    );
+    const owners = await harness.adminPool.query(
+      `SELECT user_id FROM staff_role_assignments
+       WHERE organization_id = $1 AND role = 'org_owner'`,
+      [organizationA],
+    );
+    expect(owners.rows).toHaveLength(1);
+    expect(owners.rows[0].user_id).toBe(transfer.status === 204 ? target.id : owner.id);
+  }, 30_000);
+});
+
+describe('member removal and audit', () => {
+  it('computes removal rank from the highest multi-role rank and forbids peers', async () => {
+    const oa = await member({ orgId: organizationA, roles: [adminRole, doctorA] });
+    const manager = await member({ orgId: organizationA, roles: [managerRole, doctorA] });
+    const peer = await member({ orgId: organizationA, roles: [managerRole] });
+    await call('delete', `${orgPath}/members/${oa.id}`, manager.cookie).expect(403);
+    await call('delete', `${orgPath}/members/${peer.id}`, manager.cookie).expect(403);
+    await call('delete', `${orgPath}/members/${manager.id}`, oa.cookie).expect(204);
+  }, 30_000);
+
+  it('writes exactly one audit row per mutation, with field names and never values', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [doctorA] });
+    const code = `AUDIT${randomBytes(3).toString('hex').toUpperCase()}`;
+    await call('post', `${orgPath}/branches`, owner.cookie)
+      .send({ name: 'Audit branch', code, timezone: 'UTC' })
+      .expect(201);
+    await call('patch', orgPath, owner.cookie).send({ name: 'Renamed Clinic' }).expect(200);
+    const email = 'audit-invite@clinik.test';
+    const created = await call('post', `${orgPath}/invitations`, owner.cookie)
+      .send({ email, ...doctorA })
+      .expect(201);
+    await call('delete', `${orgPath}/invitations/${created.body.id}`, owner.cookie).expect(204);
+    await call('put', `${orgPath}/members/${target.id}/roles`, owner.cookie)
+      .send({ roles: [{ role: 'receptionist', branchId: branchA }] })
+      .expect(204);
+    await call('delete', `${orgPath}/members/${target.id}`, owner.cookie).expect(204);
+
+    const rows = await auditRowsForOrg();
+    expect(rows.map(({ action }) => action)).toEqual([
+      'branch.created',
+      'organization.updated',
+      'invitation.created',
+      'invitation.revoked',
+      'member.roles_replaced',
+      'member.removed',
+    ]);
+    for (const row of rows) {
+      expect(row.organization_id).toBe(organizationA);
+      expect(row.metadata).toEqual({});
+      const changed = (row.changed_fields ?? []) as string[];
+      expect(changed.every((field) => /^[a-z][A-Za-z0-9]*$/.test(field))).toBe(true);
+      expect(changed).not.toContain(email);
+      expect(changed).not.toContain('Renamed Clinic');
+      expect(JSON.stringify(row)).not.toContain(email);
+    }
+  }, 30_000);
+});
+
+describe('P5(a) invitation listing behaviour', () => {
+  it('lists invitations by status and branch scope without exposing another organization', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const foreign = await member({ orgId: organizationB, roles: [ownerRole] });
+    const create = (email: string, branchId: string | null, orgId = organizationA) =>
+      directInvitation({
+        orgId,
+        email,
+        branchId,
+        role: branchId ? 'doctor' : 'org_admin',
+        invitedBy: orgId === organizationA ? owner.id : foreign.id,
+      });
+    const [pending, other, orgWide, foreignInvite, accepted, revoked, expired] = await Promise.all([
+      create('pending@clinik.test', branchA),
+      create('other-branch@clinik.test', otherBranch),
+      create('org-wide@clinik.test', null),
+      create('foreign@clinik.test', foreignBranch, organizationB),
+      create('accepted@clinik.test', branchA),
+      create('revoked@clinik.test', branchA),
+      create('expired@clinik.test', branchA),
+    ]);
+    await harness.adminPool.query('UPDATE invitations SET accepted_at = now() WHERE id = $1', [
+      accepted.id,
+    ]);
+    await harness.adminPool.query('UPDATE invitations SET revoked_at = now() WHERE id = $1', [
+      revoked.id,
+    ]);
+    await harness.adminPool.query(
+      "UPDATE invitations SET expires_at = now() - interval '1 second' WHERE id = $1",
+      [expired.id],
+    );
+    const list = (cookie: string, query = '') =>
+      call('get', `${orgPath}/invitations${query}`, cookie);
+    const scoped = await list(manager.cookie, '?status=pending').expect(200);
+    expect(scoped.body).toEqual([
+      {
+        id: pending.id,
+        role: 'doctor',
+        email: 'pending@clinik.test',
+        branchId: branchA,
+        invitedBy: owner.id,
+        expiresAt: expect.any(String),
+        createdAt: expect.any(String),
+        status: 'pending',
+      },
+    ]);
+    expect((await list(manager.cookie).expect(200)).body).toEqual(scoped.body);
+    const all = await list(manager.cookie, '?status=all').expect(200);
+    expect(
+      all.body.map(({ id, status }: { id: string; status: string }) => [id, status]).sort(),
+    ).toEqual(
+      [
+        [pending.id, 'pending'],
+        [accepted.id, 'accepted'],
+        [revoked.id, 'revoked'],
+        [expired.id, 'expired'],
+      ].sort(),
+    );
+    const organizationList = await list(owner.cookie, '?status=all').expect(200);
+    expect(organizationList.body.map(({ id }: { id: string }) => id).sort()).toEqual(
+      [pending.id, other.id, orgWide.id, accepted.id, revoked.id, expired.id].sort(),
+    );
+    expect(organizationList.body.map(({ id }: { id: string }) => id)).not.toContain(
+      foreignInvite.id,
+    );
+    await call(
+      'get',
+      `/api/v1/orgs/${organizationB}/invitations?status=all`,
+      manager.cookie,
+    ).expect(404);
+    await list(foreign.cookie).expect(404);
+    await list(manager.cookie, '?status=invalid').expect(400);
+  }, 30_000);
+
+  it('declares only the public list fields in OpenAPI and keeps the create response free of token data', async () => {
+    const list = document.paths['/api/v1/orgs/{orgId}/invitations'].get;
+    expect(list?.responses['200']).toMatchObject({
+      content: {
+        'application/json': {
+          schema: { items: { $ref: '#/components/schemas/InvitationListItemDto' } },
+        },
+      },
+    });
+    const schema = document.components?.schemas?.InvitationListItemDto;
+    expect(schema).toBeDefined();
+    expect(schema && 'properties' in schema && Object.keys(schema.properties ?? {}).sort()).toEqual(
+      ['id', 'email', 'role', 'branchId', 'expiresAt', 'invitedBy', 'createdAt', 'status'].sort(),
+    );
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const created = await call('post', `${orgPath}/invitations`, owner.cookie)
+      .send({ email: 'list-check@clinik.test', ...doctorA })
+      .expect(201);
+    expect(Object.keys(created.body).sort()).toEqual(['emailDelivery', 'expiresAt', 'id']);
+    expect(JSON.stringify(created.body)).not.toMatch(/[A-Za-z0-9_-]{43}/);
+  }, 30_000);
+});

@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createTransport, type SendMailOptions } from 'nodemailer';
@@ -11,6 +13,9 @@ import {
   AuthTokenService,
   PasswordService,
   RESET_TOKEN_TTL_MS,
+  SESSION_ABSOLUTE_TIMEOUT_MS,
+  SessionService,
+  STAFF_IDLE_TIMEOUT_MS,
   TokenService,
   VERIFY_TOKEN_TTL_MS,
 } from '../../src/modules/identity/core';
@@ -708,6 +713,80 @@ describe('staff invitation HTTP', () => {
     expect(rows[0].password_hash).toBe(passwordHash);
   });
 
+  it.each([
+    {
+      reason: 'logout-revoked',
+      invalidate: async (_userId, cookie) => {
+        await post('/logout').set('Cookie', cookie).expect(204);
+      },
+    },
+    {
+      reason: 'password-reset-revoked',
+      invalidate: async (userId) => {
+        const token = await authTokens.issue(userId, 'password_reset');
+        await post('/password/reset').send({ token, password: newPassword }).expect(204);
+      },
+    },
+    {
+      reason: 'other-org-removal-revoked',
+      invalidate: async (userId) => {
+        const owner = await accessUser({ orgId: organizationB, roles: [ownerRole] });
+        await harness.adminPool.query(
+          'INSERT INTO organization_members (organization_id, user_id) VALUES ($1, $2)',
+          [organizationB, userId],
+        );
+        await call('delete', `/orgs/${organizationB}/members/${userId}`, owner.cookie).expect(204);
+      },
+    },
+    {
+      reason: 'idle-expired',
+      invalidate: () => clock.advance(STAFF_IDLE_TIMEOUT_MS),
+    },
+    {
+      reason: 'absolute-expired',
+      invalidate: async (userId) => {
+        // Isolate the absolute deadline with a fixture whose idle deadline is still in the future.
+        await harness.adminPool.query(
+          "UPDATE sessions SET idle_expires_at = absolute_expires_at + interval '1 minute' WHERE user_id = $1",
+          [userId],
+        );
+        clock.advance(SESSION_ABSOLUTE_TIMEOUT_MS);
+      },
+    },
+  ] satisfies {
+    reason: string;
+    invalidate: (userId: string, cookie: string) => void | Promise<void>;
+  }[])(
+    'rejects an existing-user invitation with a $reason cookie without rotating',
+    async ({ invalidate }) => {
+      const user = await createUser();
+      const cookie = await signIn(user.email);
+      await invalidate(user.id, cookie);
+      const invitation = await createInvitation(user.email);
+      const sessionRows = () =>
+        harness.adminPool.query(
+          'SELECT id, revoked_at FROM sessions WHERE user_id = $1 ORDER BY id',
+          [user.id],
+        );
+      const before = await sessionRows();
+      expect(before.rows).toHaveLength(1);
+      const rotate = vi.spyOn(app.get(SessionService), 'rotate');
+      try {
+        const rejected = await post(invitation.path + '/accept')
+          .set('Cookie', cookie)
+          .send({})
+          .expect(401);
+        assertProblem(rejected, 'UNAUTHENTICATED');
+        expect(rejected.headers['set-cookie']).toBeUndefined();
+        expect(rotate).not.toHaveBeenCalled();
+        expect((await sessionRows()).rows).toEqual(before.rows);
+      } finally {
+        rotate.mockRestore();
+      }
+      await get(invitation.path).expect(200);
+    },
+  );
+
   it('returns the same secret-free 404 for malformed, unknown, cross-tenant, expired, revoked and accepted links', async () => {
     const email = 'unavailable@clinik.test';
     const valid = await createInvitation(email);
@@ -768,6 +847,616 @@ describe('staff invitation HTTP', () => {
     const recorded = JSON.stringify(await auditRows()) + output.join('');
     for (const secret of exposedSecrets) {
       expect(recorded.includes(secret)).toBe(false);
+    }
+  });
+});
+
+const otherBranch = '20000000-0000-0000-0000-000000000002';
+const foreignBranch = '20000000-0000-0000-0000-000000000003';
+const orgPath = `/orgs/${organizationA}`;
+const adminPath = '/admin/organizations';
+const doctorRole = { role: 'doctor', branchId: branch } as const;
+const receptionistRole = { role: 'receptionist', branchId: branch } as const;
+const managerRole = { role: 'branch_manager', branchId: branch } as const;
+const ownerRole = { role: 'org_owner', branchId: null } as const;
+const adminRole = { role: 'org_admin', branchId: null } as const;
+
+type Method = 'get' | 'post' | 'patch' | 'put' | 'delete';
+const call = (method: Method, path: string, cookie?: string) => {
+  const req = http()[method](`/api/v1${path}`).set(writeHeaders);
+  return cookie ? req.set('Cookie', cookie) : req;
+};
+
+async function accessUser(
+  options: {
+    orgId?: string;
+    roles?: readonly { role: string; branchId: string | null }[];
+    platform?: boolean;
+  } = {},
+) {
+  const user = await createUser();
+  if (options.platform)
+    await harness.adminPool.query('UPDATE users SET is_platform_admin = true WHERE id = $1', [
+      user.id,
+    ]);
+  if (options.orgId) {
+    await harness.adminPool.query(
+      'INSERT INTO organization_members (organization_id, user_id) VALUES ($1, $2)',
+      [options.orgId, user.id],
+    );
+    for (const { role, branchId } of options.roles ?? []) {
+      await harness.adminPool.query(
+        'INSERT INTO staff_role_assignments (organization_id, user_id, role, branch_id) VALUES ($1, $2, $3, $4)',
+        [options.orgId, user.id, role, branchId],
+      );
+    }
+  }
+  const { rawToken } = await app.get(SessionService).create(user.id, {
+    ip: null,
+    userAgent: null,
+    requestId: null,
+  });
+  exposedSecrets.add(rawToken);
+  return { ...user, cookie: `__Host-session=${rawToken}` };
+}
+
+function invitePath(message = messages.at(-1)): string {
+  const url = new URL(message?.text.match(/http:\/\/127\.0\.0\.1:3000\/\S+/)?.[0] ?? '');
+  expect(url.pathname).toMatch(/^\/invite\/[\da-f-]{36}\.[\w-]{43}$/);
+  exposedSecrets.add(url.pathname.split('.')[1]);
+  return url.pathname.replace('/invite/', '/invitations/');
+}
+
+async function assertAuditActions(expected: [string, string][]) {
+  const rows = await harness.adminPool.query(
+    'SELECT action, organization_id, metadata FROM audit_logs WHERE organization_id IS NOT NULL ORDER BY id',
+  );
+  expect(rows.rows).toEqual(
+    expected.map(([action, organizationId]) => ({
+      action,
+      organization_id: organizationId,
+      metadata: {},
+    })),
+  );
+}
+
+describe('provisioning and tenant access', () => {
+  beforeEach(async () => {
+    await harness.adminPool.query(
+      `INSERT INTO branches (id, organization_id, name, code, timezone) VALUES
+        ($1, $3, 'North Branch', 'NORTH', 'UTC'), ($2, $4, 'Foreign Branch', 'MAIN', 'UTC')`,
+      [otherBranch, foreignBranch, organizationA, organizationB],
+    );
+  });
+
+  it('checks CSRF then session then membership then permission, including malformed org IDs', async () => {
+    const member = await accessUser({ orgId: organizationA, roles: [doctorRole] });
+    const write = `/api/v1${orgPath}/branches`;
+    assertProblem(await http().post(write).expect(403), 'CSRF_REJECTED');
+    assertProblem(await call('post', `${orgPath}/branches`).expect(401), 'UNAUTHENTICATED');
+    assertProblem(
+      await call('post', `/orgs/${organizationB}/branches`, member.cookie).expect(404),
+      'NOT_FOUND',
+    );
+    assertProblem(
+      await call('post', '/orgs/invalid/branches', member.cookie).expect(404),
+      'NOT_FOUND',
+    );
+    assertProblem(
+      await call('post', `${orgPath}/branches`, member.cookie).expect(403),
+      'FORBIDDEN',
+    );
+  });
+
+  it('runs every tenant handler behind both the member and permission checks', async () => {
+    const noRole = await accessUser({ orgId: organizationA });
+    const nonMember = await accessUser();
+    const owned = await accessUser({ orgId: organizationA, roles: [ownerRole] });
+    const routes: [Method, string][] = [
+      ['get', ''],
+      ['patch', ''],
+      ['get', '/branches'],
+      ['post', '/branches'],
+      ['get', `/branches/${branch}`],
+      ['patch', `/branches/${branch}`],
+      ['get', '/members'],
+      ['get', '/invitations'],
+      ['post', '/invitations'],
+      ['delete', `/invitations/${randomUUID()}`],
+      ['put', `/members/${noRole.id}/roles`],
+      ['delete', `/members/${noRole.id}`],
+      ['post', '/ownership-transfer'],
+    ];
+    for (const [method, path] of routes) {
+      assertProblem(await call(method, orgPath + path, noRole.cookie).expect(403), 'FORBIDDEN');
+      assertProblem(await call(method, orgPath + path, nonMember.cookie).expect(404), 'NOT_FOUND');
+      assertProblem(
+        await call(method, `/orgs/${organizationB}${path}`, owned.cookie).expect(404),
+        'NOT_FOUND',
+      );
+    }
+    await assertAuditActions([]);
+  });
+
+  it('provisions, lists, edits and suspends organizations with one audit per mutation', async () => {
+    const admin = await accessUser({ platform: true });
+    const member = await accessUser({ orgId: organizationA, roles: [doctorRole] });
+    const routes: [Method, string][] = [
+      ['get', ''],
+      ['post', ''],
+      ['get', `/${organizationA}`],
+      ['patch', `/${organizationA}`],
+      ['post', `/${organizationA}/suspend`],
+      ['post', `/${organizationA}/reactivate`],
+      ['post', `/${organizationA}/owner-invitation`],
+    ];
+    for (const [method, path] of routes)
+      assertProblem(await call(method, adminPath + path, member.cookie).expect(404), 'NOT_FOUND');
+    const missing = randomUUID();
+    for (const [method, path] of routes.filter(([, path]) => path)) {
+      const body = path.endsWith('/owner-invitation')
+        ? { email: 'owner-new@clinik.test' }
+        : { name: 'New' };
+      assertProblem(
+        await call(method, adminPath + path.replace(organizationA, missing), admin.cookie)
+          .send(body)
+          .expect(404),
+        'NOT_FOUND',
+      );
+    }
+    const body = { name: 'New Clinic', slug: 'new-clinic', defaultTimezone: 'UTC' };
+    const created = await call('post', adminPath, admin.cookie).send(body).expect(201);
+    const id = created.body.id as string;
+    expect(created.body).toMatchObject({ ...body, status: 'active' });
+    expect(created.body.ownerInvitation).toBeUndefined();
+    assertProblem(
+      await call('post', adminPath, admin.cookie).send(body).expect(409),
+      'ORG_SLUG_TAKEN',
+    );
+    const first = (await call('get', `${adminPath}?limit=1`, admin.cookie).expect(200)).body;
+    const ordered = [organizationA, organizationB, id].sort();
+    expect(first.items.map(({ id }: { id: string }) => id)).toEqual(ordered.slice(0, 1));
+    expect(Object.keys(first.items[0]).sort()).toEqual(['id', 'name', 'status']);
+    const second = (
+      await call('get', `${adminPath}?cursor=${first.nextCursor}&limit=100`, admin.cookie).expect(
+        200,
+      )
+    ).body;
+    expect(second.items.map((item: { id: string }) => item.id)).toEqual(ordered.slice(1));
+    expect(second.nextCursor).toBeNull();
+    expect((await call('get', `${adminPath}/${id}`, admin.cookie).expect(200)).body.slug).toBe(
+      body.slug,
+    );
+    assertProblem(
+      await call('patch', `${adminPath}/${id}`, admin.cookie).send({ slug: 'renamed' }).expect(400),
+      'INVALID_REQUEST',
+    );
+    expect(
+      (
+        await call('patch', `${adminPath}/${id}`, admin.cookie)
+          .send({ name: 'Renamed' })
+          .expect(200)
+      ).body.name,
+    ).toBe('Renamed');
+    await call('get', orgPath, member.cookie).expect(200);
+    await call('post', `${adminPath}/${organizationA}/suspend`, admin.cookie).expect(200);
+    await call('get', orgPath, member.cookie).expect(404);
+    expect((await get('/me').set('Cookie', member.cookie).expect(200)).body.memberships).toEqual(
+      [],
+    );
+    await call('post', `${adminPath}/${organizationA}/reactivate`, admin.cookie).expect(200);
+    expect(
+      (await get('/me').set('Cookie', member.cookie).expect(200)).body.memberships,
+    ).toMatchObject([
+      { organizationId: organizationA, organizationName: 'Clinic A', roles: [doctorRole] },
+    ]);
+    await call('get', orgPath, member.cookie).expect(200);
+    await assertAuditActions([
+      ['organization.created', id],
+      ['organization.updated', id],
+      ['organization.suspended', organizationA],
+      ['organization.reactivated', organizationA],
+    ]);
+  });
+
+  it('handles branch reads and writes with validation, scope checks and cross-tenant resource IDs', async () => {
+    const admin = await accessUser({ orgId: organizationA, roles: [adminRole] });
+    const manager = await accessUser({ orgId: organizationA, roles: [managerRole] });
+    await call('get', orgPath, manager.cookie).expect(200);
+    await call('patch', orgPath, manager.cookie).send({ name: 'Out of scope' }).expect(403);
+    await call('patch', orgPath, admin.cookie).send({ name: 'Updated clinic' }).expect(200);
+    const { body } = await call('get', `${orgPath}/branches`, manager.cookie).expect(200);
+    expect(body.map(({ id }: { id: string }) => id)).toEqual([branch, otherBranch]);
+    await call('get', `${orgPath}/branches/${otherBranch}`, manager.cookie).expect(200);
+    await call('get', `${orgPath}/branches/${foreignBranch}`, manager.cookie).expect(404);
+    await call('patch', `${orgPath}/branches/${foreignBranch}`, manager.cookie)
+      .send({ name: 'Foreign' })
+      .expect(404);
+    await call('patch', `${orgPath}/branches/${otherBranch}`, manager.cookie)
+      .send({ name: 'Other' })
+      .expect(403);
+    await call('patch', `${orgPath}/branches/${branch}`, manager.cookie)
+      .send({ status: 'inactive' })
+      .expect(403);
+    const create = (code: string, timezone = 'UTC') =>
+      call('post', `${orgPath}/branches`, admin.cookie).send({
+        name: 'East Branch',
+        code,
+        timezone,
+      });
+    assertProblem(await create('east').expect(400), 'INVALID_REQUEST');
+    assertProblem(await create('EAST', 'not-a-zone').expect(422), 'INVALID_TIMEZONE');
+    assertProblem(await create('MAIN').expect(409), 'BRANCH_CODE_TAKEN');
+    await create('EAST', 'America/New_York').expect(201);
+    assertProblem(
+      await call('patch', `${orgPath}/branches/${branch}`, manager.cookie)
+        .send({ code: 'EAST' })
+        .expect(409),
+      'BRANCH_CODE_TAKEN',
+    );
+    await call('patch', `${orgPath}/branches/${branch}`, manager.cookie)
+      .send({ name: 'Main Updated' })
+      .expect(200);
+    await call('patch', `${orgPath}/branches/${branch}`, admin.cookie)
+      .send({ status: 'inactive' })
+      .expect(200);
+    const target = 'branch-inactive@clinik.test';
+    assertProblem(
+      await call('post', `${orgPath}/invitations`, admin.cookie)
+        .send({ email: target, ...doctorRole })
+        .expect(422),
+      'BRANCH_INACTIVE',
+    );
+    await assertAuditActions([
+      ['organization.updated', organizationA],
+      ['branch.created', organizationA],
+      ['branch.updated', organizationA],
+      ['branch.updated', organizationA],
+    ]);
+  });
+
+  it('checks invitation grants, duplicates, revocation scope and SMTP failure', async () => {
+    const admin = await accessUser({ orgId: organizationA, roles: [adminRole] });
+    const manager = await accessUser({ orgId: organizationA, roles: [managerRole] });
+    const doctor = await accessUser({ orgId: organizationA, roles: [doctorRole] });
+    const other = await accessUser({
+      orgId: organizationA,
+      roles: [{ ...doctorRole, branchId: otherBranch }],
+    });
+    const { body: members } = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
+    expect(members.map(({ userId }: { userId: string }) => userId).sort()).toEqual(
+      [manager.id, doctor.id].sort(),
+    );
+    const { body: allMembers } = await call('get', `${orgPath}/members`, admin.cookie).expect(200);
+    expect(allMembers.map(({ userId }: { userId: string }) => userId)).toContain(other.id);
+
+    const email = 'grant-check@clinik.test';
+    const invite = (
+      cookie: string,
+      input: { role: string; branchId?: string | null; email?: string },
+    ) => call('post', `${orgPath}/invitations`, cookie).send({ email, ...input });
+    await invite(manager.cookie, managerRole).expect(403);
+    await invite(manager.cookie, { ...doctorRole, branchId: otherBranch }).expect(403);
+    await invite(admin.cookie, adminRole).expect(403);
+    await invite(admin.cookie, { ...doctorRole, branchId: foreignBranch }).expect(404);
+    assertProblem(
+      await invite(manager.cookie, { ...doctorRole, email: manager.email }).expect(403),
+      'SELF_GRANT_FORBIDDEN',
+    );
+    assertProblem(
+      await invite(admin.cookie, { ...doctorRole, email: doctor.email }).expect(409),
+      'ALREADY_HAS_ROLE',
+    );
+    const sent = await invite(manager.cookie, doctorRole).expect(201);
+    const path = invitePath();
+    expect(sent.body).toEqual({
+      id: expect.any(String),
+      expiresAt: new Date(clock.now().getTime() + 7 * 24 * HOUR).toISOString(),
+      emailDelivery: 'sent',
+    });
+    await get(path).expect(200);
+    assertProblem(await invite(manager.cookie, doctorRole).expect(409), 'INVITATION_PENDING');
+    const remoteBranch = await invite(admin.cookie, {
+      ...doctorRole,
+      branchId: otherBranch,
+    }).expect(201);
+    const revoke = (id: string) => call('delete', `${orgPath}/invitations/${id}`, manager.cookie);
+    await revoke(remoteBranch.body.id).expect(403);
+    await revoke(sent.body.id).expect(204);
+    await get(path).expect(404);
+    sendMail.mockRejectedValueOnce(new Error('Synthetic SMTP failure'));
+    expect((await invite(manager.cookie, doctorRole).expect(201)).body.emailDelivery).toBe(
+      'failed',
+    );
+    await assertAuditActions([
+      ['invitation.created', organizationA],
+      ['invitation.created', organizationA],
+      ['invitation.revoked', organizationA],
+      ['invitation.created', organizationA],
+    ]);
+  });
+
+  it('supersedes prior owner links and provisions an owner in the organization creation transaction', async () => {
+    const admin = await accessUser({ platform: true });
+    const organization = {
+      name: 'Provisioned Clinic',
+      slug: 'provisioned-clinic',
+      defaultTimezone: 'UTC',
+    };
+    assertProblem(
+      await call('post', adminPath, admin.cookie)
+        .send({ ...organization, ownerEmail: admin.email })
+        .expect(403),
+      'SELF_GRANT_FORBIDDEN',
+    );
+    const create = await call('post', adminPath, admin.cookie)
+      .send({
+        ...organization,
+        ownerEmail: 'first-owner@clinik.test',
+        ownerFullName: 'First Owner',
+      })
+      .expect(201);
+    const id = create.body.id as string;
+    expect(create.body.ownerInvitation).toMatchObject({ emailDelivery: 'sent' });
+    const first = invitePath();
+    await get(first).expect(200);
+    const issue = () =>
+      call('post', `${adminPath}/${id}/owner-invitation`, admin.cookie).send({
+        email: 'second-owner@clinik.test',
+      });
+    await issue().expect(201);
+    const second = invitePath();
+    await get(first).expect(404);
+    const results = await Promise.all(
+      [first, second].map((path) => post(path + '/accept').send({ fullName, password })),
+    );
+    expect(results.map(({ status }) => status)).toEqual([404, 204]);
+    assertProblem(await issue().expect(409), 'OWNER_EXISTS');
+    const rows = await harness.adminPool.query(
+      'SELECT role FROM staff_role_assignments WHERE organization_id = $1',
+      [id],
+    );
+    expect(rows.rows).toEqual([{ role: 'org_owner' }]);
+    await assertAuditActions([
+      ['organization.created', id],
+      ['invitation.created', id],
+      ['invitation.created', id],
+      ['invitation.accepted', id],
+    ]);
+  });
+
+  it('accepts only one of two independently pending owner links', async () => {
+    const issuer = await accessUser({ platform: true });
+    const pendingPaths: string[] = [];
+    for (const email of ['legacy-first@clinik.test', 'legacy-second@clinik.test']) {
+      const token = tokens.generate();
+      await harness.adminPool.query(
+        `INSERT INTO invitations (organization_id, email, role, token_hash, invited_by, expires_at)
+         VALUES ($1, $2, 'org_owner', $3, $4, $5)`,
+        [organizationA, email, token.hash, issuer.id, new Date(clock.now().getTime() + HOUR)],
+      );
+      pendingPaths.push(`/invitations/${organizationA}.${token.raw}`);
+    }
+    const responses = await Promise.all(
+      pendingPaths.map((path) => post(path + '/accept').send({ fullName, password })),
+    );
+    expect(responses.map(({ status }) => status).sort()).toEqual([204, 404]);
+    await assertAuditActions([['invitation.accepted', organizationA]]);
+    expect((await harness.adminPool.query('SELECT role FROM staff_role_assignments')).rows).toEqual(
+      [{ role: 'org_owner' }],
+    );
+  });
+
+  it('checks both sides of a role diff and serializes concurrent replacements', async () => {
+    const owner = await accessUser({ orgId: organizationA, roles: [ownerRole] });
+    const admin = await accessUser({ orgId: organizationA, roles: [adminRole] });
+    const manager = await accessUser({ orgId: organizationA, roles: [managerRole] });
+    const target = await accessUser({ orgId: organizationA, roles: [doctorRole] });
+    const foreign = await accessUser({
+      orgId: organizationB,
+      roles: [{ ...doctorRole, branchId: foreignBranch }],
+    });
+    const replace = (
+      cookie: string,
+      id: string,
+      roles: readonly { role: string; branchId: string | null }[],
+    ) => call('put', `${orgPath}/members/${id}/roles`, cookie).send({ roles });
+    await replace(manager.cookie, target.id, [managerRole]).expect(403);
+    await replace(manager.cookie, target.id, [{ ...doctorRole, branchId: otherBranch }]).expect(
+      403,
+    );
+    await replace(admin.cookie, target.id, [adminRole]).expect(403);
+    await replace(admin.cookie, owner.id, []).expect(403);
+    await replace(manager.cookie, admin.id, []).expect(403);
+    await replace(owner.cookie, foreign.id, [doctorRole]).expect(404);
+    await replace(owner.cookie, target.id, [{ ...doctorRole, branchId: foreignBranch }]).expect(
+      404,
+    );
+    assertProblem(
+      await replace(owner.cookie, owner.id, [adminRole]).expect(403),
+      'SELF_GRANT_FORBIDDEN',
+    );
+    const outcomes = await Promise.all([
+      replace(owner.cookie, target.id, [adminRole, doctorRole]),
+      replace(owner.cookie, target.id, [receptionistRole]),
+    ]);
+    expect(outcomes.map(({ status }) => status)).toEqual([204, 204]);
+    const roles = (await get('/me').set('Cookie', target.cookie).expect(200)).body.memberships[0]
+      .roles;
+    expect([[adminRole, doctorRole], [receptionistRole]]).toContainEqual(roles);
+    await assertAuditActions([
+      ['member.roles_replaced', organizationA],
+      ['member.roles_replaced', organizationA],
+    ]);
+  });
+
+  it('transfers ownership exactly once under concurrency and leaves password lockout alone', async () => {
+    const owner = await accessUser({ orgId: organizationA, roles: [ownerRole] });
+    const first = await accessUser({ orgId: organizationA, roles: [adminRole, doctorRole] });
+    const second = await accessUser({ orgId: organizationA, roles: [adminRole] });
+    const foreign = await accessUser({ orgId: organizationB, roles: [adminRole] });
+    const transfer = (id: string, currentPassword = password) =>
+      call('post', `${orgPath}/ownership-transfer`, owner.cookie).send({
+        newOwnerUserId: id,
+        currentPassword,
+      });
+    await transfer(foreign.id).expect(404);
+    await transfer(owner.id).expect(403);
+    assertProblem(await transfer(first.id, 'incorrect').expect(422), 'INVALID_PASSWORD');
+    const attempts = await Promise.all([transfer(first.id), transfer(second.id)]);
+    expect(attempts.map(({ status }) => status).sort()).toEqual([204, 403]);
+    const winner = attempts[0].status === 204 ? first : second;
+    const { rows } = await harness.adminPool.query(
+      `SELECT user_id, role FROM staff_role_assignments WHERE organization_id = $1 AND
+        (role = 'org_owner' OR user_id = $2 OR (user_id = $3 AND role = 'org_admin'))
+       ORDER BY role`,
+      [organizationA, owner.id, winner.id],
+    );
+    expect(rows).toEqual([
+      { user_id: owner.id, role: 'org_admin' },
+      { user_id: winner.id, role: 'org_owner' },
+    ]);
+    expect(
+      (
+        await harness.adminPool.query('SELECT failed_login_count FROM users WHERE id = $1', [
+          owner.id,
+        ])
+      ).rows,
+    ).toEqual([{ failed_login_count: 0 }]);
+    await assertAuditActions([
+      ['org.ownership_transfer.denied', organizationA],
+      ['organization.ownership_transferred', organizationA],
+    ]);
+  });
+
+  it('suspends a removed member, revokes all sessions and reactivates only the new role', async () => {
+    const owner = await accessUser({ orgId: organizationA, roles: [ownerRole] });
+    const admin = await accessUser({ orgId: organizationA, roles: [adminRole] });
+    const manager = await accessUser({ orgId: organizationA, roles: [managerRole] });
+    const target = await accessUser({
+      orgId: organizationA,
+      roles: [doctorRole, { ...doctorRole, branchId: otherBranch }],
+    });
+    const foreign = await accessUser({ orgId: organizationB, roles: [adminRole] });
+    const secondCookie = await signIn(target.email);
+    const remove = (cookie: string, userId: string) =>
+      call('delete', `${orgPath}/members/${userId}`, cookie);
+    await remove(owner.cookie, owner.id).expect(403);
+    await remove(admin.cookie, owner.id).expect(403);
+    await remove(manager.cookie, target.id).expect(403);
+    await remove(owner.cookie, foreign.id).expect(404);
+    await remove(admin.cookie, target.id).expect(204);
+    await remove(admin.cookie, target.id).expect(404);
+    for (const cookie of [target.cookie, secondCookie])
+      await call('get', orgPath, cookie).expect(401);
+    expect(
+      (
+        await harness.adminPool.query(
+          `SELECT status,
+        (SELECT count(*)::int FROM staff_role_assignments WHERE user_id = $1) AS roles,
+        (SELECT count(*)::int FROM sessions WHERE user_id = $1 AND revoked_at IS NULL) AS live
+        FROM organization_members WHERE user_id = $1 AND organization_id = $2`,
+          [target.id, organizationA],
+        )
+      ).rows,
+    ).toEqual([{ status: 'suspended', roles: 0, live: 0 }]);
+    const fresh = await signIn(target.email);
+    await call('get', orgPath, fresh).expect(404);
+    expect((await get('/me').set('Cookie', fresh).expect(200)).body.memberships).toEqual([]);
+    await call('post', `${orgPath}/invitations`, manager.cookie)
+      .send({ email: target.email, ...receptionistRole })
+      .expect(201);
+    const accepted = await post(invitePath() + '/accept')
+      .set('Cookie', fresh)
+      .send({})
+      .expect(204);
+    const session = cookieFrom(accepted);
+    await call('get', orgPath, session).expect(200);
+    expect((await get('/me').set('Cookie', session).expect(200)).body.memberships).toMatchObject([
+      { organizationId: organizationA, status: 'active', roles: [receptionistRole] },
+    ]);
+    await assertAuditActions([
+      ['member.removed', organizationA],
+      ['invitation.created', organizationA],
+      ['invitation.accepted', organizationA],
+    ]);
+  });
+
+  it('serializes invitation revocation against acceptance', async () => {
+    const owner = await accessUser({ orgId: organizationA, roles: [ownerRole] });
+    const created = await call('post', `${orgPath}/invitations`, owner.cookie)
+      .send({ email: 'revoke-race@clinik.test', ...doctorRole })
+      .expect(201);
+    const path = invitePath();
+    const [revoked, accepted] = await Promise.all([
+      call('delete', `${orgPath}/invitations/${created.body.id}`, owner.cookie),
+      post(path + '/accept').send({ fullName, password }),
+    ]);
+    expect([revoked.status, accepted.status].sort()).toEqual([204, 404]);
+    await get(path).expect(404);
+    await assertAuditActions([
+      ['invitation.created', organizationA],
+      [revoked.status === 204 ? 'invitation.revoked' : 'invitation.accepted', organizationA],
+    ]);
+  });
+
+  it('delivers a working invitation through Mailpit after committing and keeps the raw token out of pino', async () => {
+    interface MailpitContainer {
+      withExposedPorts(...ports: number[]): MailpitContainer;
+      start(): Promise<{
+        getHost(): string;
+        getMappedPort(port: number): number;
+        stop(): Promise<unknown>;
+      }>;
+    }
+    const requireFromTestcontainers = createRequire(
+      createRequire(import.meta.url).resolve('@testcontainers/postgresql'),
+    );
+    const { GenericContainer } = requireFromTestcontainers('testcontainers') as {
+      GenericContainer: new (image: string) => MailpitContainer;
+    };
+    const mailpit = await new GenericContainer('axllent/mailpit:latest')
+      .withExposedPorts(1025, 8025)
+      .start();
+    try {
+      const smtp = createTransport({
+        host: mailpit.getHost(),
+        port: mailpit.getMappedPort(1025),
+        connectionTimeout: 5_000,
+      });
+      const owner = await accessUser({ orgId: organizationA, roles: [ownerRole] });
+      const email = 'mailpit-invite@clinik.test';
+      sendMail.mockImplementationOnce(async (message) => {
+        await assertAuditActions([['invitation.created', organizationA]]);
+        await smtp.sendMail(message);
+      });
+      const { body } = await call('post', `${orgPath}/invitations`, owner.cookie)
+        .send({ email, ...doctorRole })
+        .expect(201);
+      expect(body.emailDelivery).toBe('sent');
+      const base = `http://${mailpit.getHost()}:${mailpit.getMappedPort(8025)}`;
+      const messageId = await vi.waitFor(async () => {
+        const response = await fetch(base + '/api/v1/messages');
+        expect(response.ok).toBe(true);
+        const { messages } = (await response.json()) as { messages: { ID: string }[] };
+        expect(messages).toHaveLength(1);
+        return messages[0].ID;
+      });
+      const message = (await (await fetch(base + '/api/v1/message/' + messageId)).json()) as {
+        Text: string;
+      };
+      const path = invitePath({ to: [{ address: email }], subject: '', text: message.Text });
+      await get(path).expect(200);
+      await post(path + '/accept')
+        .send({ fullName, password })
+        .expect(204);
+      expect(output.join('')).not.toContain(path.split('.')[1]);
+      await assertAuditActions([
+        ['invitation.created', organizationA],
+        ['invitation.accepted', organizationA],
+      ]);
+    } finally {
+      await mailpit.stop();
     }
   });
 });

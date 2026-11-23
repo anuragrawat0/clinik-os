@@ -54,7 +54,13 @@ export class AuthProfileService {
             eq(staffRoleAssignments.userId, organizationMembers.userId),
           ),
         )
-        .where(eq(organizationMembers.userId, userId))
+        .where(
+          and(
+            eq(organizationMembers.userId, userId),
+            eq(organizationMembers.status, 'active'),
+            eq(organizations.status, 'active'),
+          ),
+        )
         .orderBy(
           organizations.name,
           organizations.id,
