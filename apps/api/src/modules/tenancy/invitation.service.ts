@@ -1,6 +1,6 @@
 import { canGrant } from '@clinik/shared';
 import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
-import { DrizzleQueryError, and, eq, gt, isNull, lte, or } from 'drizzle-orm';
+import { DrizzleQueryError, and, desc, eq, gt, inArray, isNull, lte, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { coversBranch, forbidden } from '../../core/access/access';
 import { AuditWriter } from '../../core/audit';
@@ -11,6 +11,7 @@ import {
   invitations,
   organizationMembers,
   organizations,
+  sessions,
   staffRoleAssignments,
   users,
 } from '../../core/db/schema/m1a';
@@ -29,10 +30,16 @@ import { acceptInvitationInput, type InvitationPreviewDto } from './invitation.d
 import {
   OrganizationService,
   isUniqueViolation,
+  lockOrganization,
   recordMutation,
   type OrganizationActor,
 } from './organization.service';
-import type { InvitationDeliveryDto, StaffAssignment } from './tenancy.dto';
+import type {
+  InvitationDeliveryDto,
+  InvitationListItemDto,
+  InvitationListFilter,
+  StaffAssignment,
+} from './tenancy.dto';
 
 const invitationLink = z.tuple([z.guid(), z.string().regex(/^[A-Za-z0-9_-]{43}$/)]);
 const invitationTtlMs = 7 * 24 * 60 * 60 * 1000;
@@ -72,15 +79,69 @@ export class InvitationService {
     @Inject(OrganizationService) private readonly organization: OrganizationService,
   ) {}
 
+  async list(
+    actor: TenantOperation,
+    filter: InvitationListFilter,
+  ): Promise<InvitationListItemDto[]> {
+    const now = this.clock.now();
+    const coveredBranches = actor.roles.flatMap(({ branchId }) =>
+      branchId !== null && coversBranch(actor, 'member.list', branchId) ? [branchId] : [],
+    );
+    const rows = await actor.tx
+      .select({
+        id: invitations.id,
+        email: invitations.email,
+        role: invitations.role,
+        branchId: invitations.branchId,
+        expiresAt: invitations.expiresAt,
+        invitedBy: invitations.invitedBy,
+        createdAt: invitations.createdAt,
+        acceptedAt: invitations.acceptedAt,
+        revokedAt: invitations.revokedAt,
+      })
+      .from(invitations)
+      .where(
+        and(
+          eq(invitations.organizationId, actor.orgId),
+          coversBranch(actor, 'member.list', null)
+            ? undefined
+            : inArray(invitations.branchId, coveredBranches),
+          filter === 'pending'
+            ? and(
+                isNull(invitations.acceptedAt),
+                isNull(invitations.revokedAt),
+                gt(invitations.expiresAt, now),
+              )
+            : undefined,
+        ),
+      )
+      .orderBy(desc(invitations.createdAt), invitations.id);
+    return rows.map(({ acceptedAt, revokedAt, ...row }) => ({
+      ...row,
+      status: acceptedAt
+        ? 'accepted'
+        : revokedAt
+          ? 'revoked'
+          : row.expiresAt <= now
+            ? 'expired'
+            : 'pending',
+    }));
+  }
+
   async issueStaff(
     actor: TenantOperation,
     input: StaffAssignment & { email: string },
     meta: RequestMeta,
   ) {
     const { tx, orgId } = actor;
-    const branch =
-      input.branchId === null ? null : await this.organization.getBranch(actor, input.branchId);
+    if (input.branchId !== null) await this.organization.getBranch(actor, input.branchId);
     if (!canGrant(actor.roles, input.role, input.branchId)) forbidden();
+    const locked = await this.organization.lockForMember(actor, 'member.manage');
+    if (!canGrant(locked.roles, input.role, input.branchId)) forbidden();
+    const branch =
+      input.branchId === null
+        ? null
+        : await this.organization.getBranch(locked, input.branchId, true);
     if (branch && branch.status !== 'active')
       throw new HttpException({ code: 'BRANCH_INACTIVE' }, 422);
 
@@ -141,6 +202,7 @@ export class InvitationService {
     meta: RequestMeta,
   ) {
     const { tx, orgId } = actor;
+    await lockOrganization(tx, orgId);
     const [owner] = await tx
       .select({ id: staffRoleAssignments.id })
       .from(staffRoleAssignments)
@@ -219,24 +281,27 @@ export class InvitationService {
   }
 
   async revoke(actor: TenantOperation, id: string, meta: RequestMeta): Promise<void> {
-    const now = this.clock.now();
-    const pending = and(
-      eq(invitations.organizationId, actor.orgId),
-      eq(invitations.id, id),
-      isNull(invitations.acceptedAt),
-      isNull(invitations.revokedAt),
-      gt(invitations.expiresAt, now),
-    );
+    const pending = (now: Date) =>
+      and(
+        eq(invitations.organizationId, actor.orgId),
+        eq(invitations.id, id),
+        isNull(invitations.acceptedAt),
+        isNull(invitations.revokedAt),
+        gt(invitations.expiresAt, now),
+      );
     const [invitation] = await actor.tx
       .select({ branchId: invitations.branchId })
       .from(invitations)
-      .where(pending);
+      .where(pending(this.clock.now()));
     if (!invitation) unavailable();
     if (!coversBranch(actor, 'member.manage', invitation.branchId)) forbidden();
+    const locked = await this.organization.lockForMember(actor, 'member.manage');
+    if (!coversBranch(locked, 'member.manage', invitation.branchId)) forbidden();
+    const now = this.clock.now();
     const [revoked] = await actor.tx
       .update(invitations)
       .set({ revokedAt: now })
-      .where(pending)
+      .where(pending(now))
       .returning({ id: invitations.id });
     if (!revoked) unavailable();
     await recordMutation(this.audit, actor, meta, {
@@ -276,7 +341,7 @@ export class InvitationService {
           or(isNull(invitations.branchId), eq(branches.status, 'active')),
         ),
       );
-    const [row] = await (lock ? query.for('update', { of: invitations }) : query);
+    const [row] = await (lock ? query.for('no key update', { of: invitations }) : query);
     if (
       !row ||
       row.invitation.acceptedAt ||
@@ -315,16 +380,16 @@ export class InvitationService {
     meta: RequestMeta,
   ): Promise<string> {
     const [orgId, rawToken] = parseLink(token);
-    // The public route has no SessionGuard. Resolve the optional cookie before taking DB locks.
-    const presented = cookie ? await this.sessions.validate(cookie) : undefined;
     return withTenantTransaction(this.database.db, { orgId }, async (tx) => {
-      const [org] = await tx
-        .select({ id: organizations.id })
-        .from(organizations)
-        .where(and(eq(organizations.id, orgId), eq(organizations.status, 'active')))
-        .for('update');
-      if (!org) unavailable();
+      // A public request must prove it has a live invitation before it can take the org lock.
+      await this.findInvitation(tx, orgId, rawToken, false);
+      const org = await lockOrganization(tx, orgId);
+      if (org.status !== 'active') unavailable();
       const { invitation } = await this.findInvitation(tx, orgId, rawToken, true);
+      if (invitation.branchId !== null) {
+        const branch = await this.organization.getBranch({ tx, orgId }, invitation.branchId, true);
+        if (branch.status !== 'active') unavailable();
+      }
       const { fullName, password } = parseInput(acceptInvitationInput, body ?? {});
       let existing = await this.findUser(tx, invitation.email);
       let newUserId: string | undefined;
@@ -355,19 +420,26 @@ export class InvitationService {
       let sessionToken: string;
       if (newUserId) {
         userId = newUserId;
-        if (cookie)
-          await this.sessions.revokeByRawToken(cookie, { reason: 'login_replaced', meta }, tx);
         sessionToken = (await this.sessions.create(userId, meta, tx)).rawToken;
       } else {
-        if (
-          existing?.status !== 'active' ||
-          presented?.status !== 'valid' ||
-          presented.context.userId !== existing.id
-        )
-          unauthenticated();
+        if (existing?.status !== 'active' || !cookie || cookie.length > 256) unauthenticated();
         userId = existing.id;
+        const now = this.clock.now();
+        const [presented] = await tx
+          .select({ id: sessions.id })
+          .from(sessions)
+          .where(
+            and(
+              eq(sessions.userId, userId),
+              eq(sessions.tokenHash, this.tokens.hash(cookie)),
+              isNull(sessions.revokedAt),
+              gt(sessions.idleExpiresAt, now),
+              gt(sessions.absoluteExpiresAt, now),
+            ),
+          );
+        if (!presented) unauthenticated();
         try {
-          sessionToken = await this.sessions.rotate(presented.context.sessionId, tx);
+          sessionToken = await this.sessions.rotate(presented.id, tx);
           // Serialize with password reset and status changes. A reset may already hold the
           // user row while waiting for this session row, so fail immediately on a locked user.
           const [active] = await tx

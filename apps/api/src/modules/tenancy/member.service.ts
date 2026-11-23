@@ -1,9 +1,15 @@
 import { canGrant, isStaffRole, type StaffRole } from '@clinik/shared';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
-import { coversBranch, forbidden, notFound } from '../../core/access/access';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { coversBranch, forbidden } from '../../core/access/access';
 import { AuditWriter } from '../../core/audit';
-import { organizationMembers, staffRoleAssignments, users } from '../../core/db/schema/m1a';
+import { CLOCK, type Clock } from '../../core/clock/clock';
+import {
+  organizationMembers,
+  sessions,
+  staffRoleAssignments,
+  users,
+} from '../../core/db/schema/m1a';
 import type { TenantOperation } from '../../core/tenancy-context/request-transaction';
 import { PasswordService, SessionService, type RequestMeta } from '../identity/core';
 import { OrganizationService, recordMutation } from './organization.service';
@@ -18,6 +24,7 @@ const roleRanks: Record<StaffRole, number> = {
 };
 const highestRank = (roles: readonly StaffAssignment[]) =>
   Math.max(0, ...roles.map(({ role }) => roleRanks[role]));
+const reauthFailureLimit = 5;
 
 function selfGrant(): never {
   throw new HttpException({ code: 'SELF_GRANT_FORBIDDEN' }, 403);
@@ -25,11 +32,15 @@ function selfGrant(): never {
 
 @Injectable()
 export class MemberService {
+  private readonly reauthFailures = new Map<string, { count: number }>();
+  private readonly pendingReauthDenials = new Map<string, Promise<void>>();
+
   constructor(
     @Inject(AuditWriter) private readonly audit: AuditWriter,
     @Inject(OrganizationService) private readonly organization: OrganizationService,
     @Inject(PasswordService) private readonly passwords: PasswordService,
     @Inject(SessionService) private readonly sessions: SessionService,
+    @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
   async list(actor: TenantOperation): Promise<MemberDto[]> {
@@ -60,45 +71,14 @@ export class MemberService {
       )
       .orderBy(users.fullName, users.id, staffRoleAssignments.role, staffRoleAssignments.branchId);
     const members = new Map<string, MemberDto>();
+    const orgWide = coversBranch(actor, 'member.list', null);
     for (const { role, branchId, ...fields } of rows) {
+      if (!orgWide && (!role || !coversBranch(actor, 'member.list', branchId))) continue;
       const member = members.get(fields.userId) ?? { ...fields, roles: [] };
       if (role && isStaffRole(role)) member.roles.push({ role, branchId });
       members.set(member.userId, member);
     }
-    if (coversBranch(actor, 'member.list', null)) return [...members.values()];
-    return [...members.values()].filter((member) =>
-      member.roles.some(({ branchId }) => coversBranch(actor, 'member.list', branchId ?? null)),
-    );
-  }
-
-  private async activeRoles({ tx, orgId }: TenantOperation, userId: string) {
-    const [member] = await tx
-      .select({ userId: organizationMembers.userId })
-      .from(organizationMembers)
-      .where(
-        and(
-          eq(organizationMembers.organizationId, orgId),
-          eq(organizationMembers.userId, userId),
-          eq(organizationMembers.status, 'active'),
-        ),
-      );
-    if (!member) notFound();
-    const rows = await tx
-      .select({
-        id: staffRoleAssignments.id,
-        role: staffRoleAssignments.role,
-        branchId: staffRoleAssignments.branchId,
-      })
-      .from(staffRoleAssignments)
-      .where(
-        and(
-          eq(staffRoleAssignments.organizationId, orgId),
-          eq(staffRoleAssignments.userId, userId),
-        ),
-      );
-    return rows.flatMap(({ id, role, branchId }) =>
-      isStaffRole(role) ? [{ id, role, branchId }] : [],
-    );
+    return [...members.values()];
   }
 
   async replaceRoles(
@@ -107,16 +87,23 @@ export class MemberService {
     roles: StaffAssignment[],
     meta: RequestMeta,
   ): Promise<void> {
-    const { orgId, tx } = actor;
     if (userId === actor.userId) selfGrant();
-    const oldRoles = await this.activeRoles(actor, userId);
+    const locked = await this.organization.lockForMember(actor, 'member.manage');
+    const { orgId, tx } = locked;
+    const oldRoles = await this.organization.activeMemberRoles(locked, userId);
     const oldKeys = new Set(oldRoles.map(roleKey));
     const newKeys = new Set(roles.map(roleKey));
     const added = roles.filter((role) => !oldKeys.has(roleKey(role)));
     const removed = oldRoles.filter((role) => !newKeys.has(roleKey(role)));
-    for (const { role, branchId } of [...added, ...removed]) {
-      if (branchId !== null) await this.organization.getBranch(actor, branchId);
-      if (role === 'org_owner' || !canGrant(actor.roles, role, branchId)) forbidden();
+    for (const { role, branchId } of added) {
+      const branch =
+        branchId === null ? null : await this.organization.getBranch(locked, branchId, true);
+      if (role === 'org_owner' || !canGrant(locked.roles, role, branchId)) forbidden();
+      if (branch && branch.status !== 'active')
+        throw new HttpException({ code: 'BRANCH_INACTIVE' }, 422);
+    }
+    for (const { role, branchId } of removed) {
+      if (role === 'org_owner' || !canGrant(locked.roles, role, branchId)) forbidden();
     }
     if (removed.length)
       await tx.delete(staffRoleAssignments).where(
@@ -147,14 +134,15 @@ export class MemberService {
   }
 
   async remove(actor: TenantOperation, userId: string, meta: RequestMeta): Promise<void> {
-    const { orgId, tx } = actor;
     if (userId === actor.userId) forbidden();
-    const target = await this.activeRoles(actor, userId);
-    if (highestRank(actor.roles) <= highestRank(target)) forbidden();
+    const locked = await this.organization.lockForMember(actor, 'member.manage');
+    const { orgId, tx } = locked;
+    const target = await this.organization.activeMemberRoles(locked, userId);
+    if (highestRank(locked.roles) <= highestRank(target)) forbidden();
     if (
-      !coversBranch(actor, 'member.manage', null) &&
+      !coversBranch(locked, 'member.manage', null) &&
       (!target.length ||
-        target.some(({ branchId }) => !coversBranch(actor, 'member.manage', branchId)))
+        target.some(({ branchId }) => !coversBranch(locked, 'member.manage', branchId)))
     )
       forbidden();
 
@@ -183,19 +171,30 @@ export class MemberService {
 
   async transferOwnership(
     actor: TenantOperation,
+    sessionId: string,
     { newOwnerUserId, currentPassword }: { newOwnerUserId: string; currentPassword: string },
     meta: RequestMeta,
   ): Promise<void> {
     const { orgId, userId, tx } = actor;
     if (newOwnerUserId === userId) selfGrant();
-    await this.activeRoles(actor, newOwnerUserId);
-    const [user] = await tx
+    await this.organization.activeMemberRoles(actor, newOwnerUserId);
+    const userQuery = tx
       .select({ passwordHash: users.passwordHash })
       .from(users)
-      .where(eq(users.id, userId))
-      .for('no key update');
-    if (!user?.passwordHash || !(await this.passwords.verify(user.passwordHash, currentPassword)))
-      throw new HttpException({ code: 'INVALID_PASSWORD' }, 422);
+      .where(and(eq(users.id, userId), eq(users.status, 'active')));
+    const [user] = await userQuery;
+    if (!user?.passwordHash || !(await this.passwords.verify(user.passwordHash, currentPassword))) {
+      return this.denyOwnershipTransfer(actor, sessionId, meta);
+    }
+
+    const locked = await this.organization.lockForMember(actor, 'org.ownership.transfer');
+    await this.organization.activeMemberRoles(locked, newOwnerUserId);
+    const [currentUser] = await userQuery.for('no key update');
+    if (currentUser?.passwordHash !== user.passwordHash)
+      throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
+    if ((await this.reauthSessionTimeLeft(actor, sessionId, true)) === null)
+      throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
+    const priorFailures = this.reauthFailures.get(sessionId);
 
     const assignment = (assignee: string, role: StaffRole) =>
       and(
@@ -226,5 +225,79 @@ export class MemberService {
       resourceId: orgId,
       changedFields: ['roles'],
     });
+    actor.afterCommit(async () => {
+      if (this.reauthFailures.get(sessionId) === priorFailures)
+        this.reauthFailures.delete(sessionId);
+    });
+  }
+
+  private async reauthSessionTimeLeft(
+    { tx, userId }: TenantOperation,
+    sessionId: string,
+    lock = false,
+  ) {
+    const query = tx
+      .select({
+        idleExpiresAt: sessions.idleExpiresAt,
+        absoluteExpiresAt: sessions.absoluteExpiresAt,
+      })
+      .from(sessions)
+      .where(
+        and(eq(sessions.id, sessionId), eq(sessions.userId, userId), isNull(sessions.revokedAt)),
+      );
+    const [session] = await (lock ? query.for('no key update') : query);
+    const now = this.clock.now();
+    if (!session || session.idleExpiresAt <= now || session.absoluteExpiresAt <= now) return null;
+    return session.absoluteExpiresAt.getTime() - now.getTime();
+  }
+
+  private async denyOwnershipTransfer(
+    actor: TenantOperation,
+    sessionId: string,
+    meta: RequestMeta,
+  ): Promise<never> {
+    // Serialize denials in memory because revocation takes the row lock in its own transaction.
+    const previous = this.pendingReauthDenials.get(sessionId);
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.pendingReauthDenials.set(sessionId, current);
+    try {
+      await previous;
+      const remainingMs = await this.reauthSessionTimeLeft(actor, sessionId);
+      await this.audit.record({
+        ...meta,
+        action: 'org.ownership_transfer.denied',
+        outcome: 'denied',
+        organizationId: actor.orgId,
+        actorUserId: actor.userId,
+        resourceType: 'organization',
+        resourceId: actor.orgId,
+      });
+      if (remainingMs === null) {
+        this.reauthFailures.delete(sessionId);
+        throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
+      }
+      const prior = this.reauthFailures.get(sessionId);
+      const count = (prior?.count ?? 0) + 1;
+      if (count >= reauthFailureLimit) {
+        await this.sessions.revoke(sessionId, {
+          userId: actor.userId,
+          actorUserId: actor.userId,
+          reason: 'reauth_failed',
+          meta,
+        });
+        this.reauthFailures.delete(sessionId);
+        throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
+      }
+      this.reauthFailures.set(sessionId, { count });
+      if (!prior) setTimeout(() => this.reauthFailures.delete(sessionId), remainingMs).unref();
+      throw new HttpException({ code: 'INVALID_PASSWORD' }, 422);
+    } finally {
+      if (this.pendingReauthDenials.get(sessionId) === current)
+        this.pendingReauthDenials.delete(sessionId);
+      release();
+    }
   }
 }

@@ -67,11 +67,8 @@ export class TenantGuard implements CanActivate {
           .where(and(eq(organizations.id, orgId), eq(organizations.status, 'active')));
         const [membership] = await membershipQuery;
         if (!membership) notFound();
-        const writes = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
-        const [org] = await (writes ? orgQuery.for('update') : orgQuery);
+        const [org] = await orgQuery;
         if (!org) notFound();
-        // A removal could have committed while this write waited for the organization lock.
-        if (writes && !(await membershipQuery)[0]) notFound();
         const rows = await tx
           .select({ role: staffRoleAssignments.role, branchId: staffRoleAssignments.branchId })
           .from(staffRoleAssignments)

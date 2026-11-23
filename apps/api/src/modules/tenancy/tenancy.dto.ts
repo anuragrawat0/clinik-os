@@ -103,6 +103,11 @@ const roleScopeValid = ({ role, branchId }: { role: string; branchId: string | n
   (role === 'org_owner' || role === 'org_admin') === (branchId === null);
 
 export const createInvitationInput = z.strictObject({ email, ...roleShape }).refine(roleScopeValid);
+export const invitationListQuery = z.strictObject({
+  status: z.enum(['pending', 'all']).default('pending'),
+});
+export type InvitationListFilter = z.output<typeof invitationListQuery>['status'];
+const invitationStatuses = ['pending', 'accepted', 'revoked', 'expired'] as const;
 const assignmentInput = z.strictObject(roleShape).refine(roleScopeValid);
 export type StaffAssignment = z.output<typeof assignmentInput>;
 
@@ -166,6 +171,17 @@ export class InvitationDeliveryDto {
   @ApiProperty(id) id!: string;
   @ApiProperty(date) expiresAt!: Date;
   @ApiProperty({ enum: ['sent', 'failed'] }) emailDelivery!: 'sent' | 'failed';
+}
+
+export class InvitationListItemDto {
+  @ApiProperty(id) id!: string;
+  @ApiProperty(emailProperty) email!: string;
+  @ApiProperty({ enum: staffRoles }) role!: string;
+  @ApiProperty({ ...id, nullable: true }) branchId!: string | null;
+  @ApiProperty(date) expiresAt!: Date;
+  @ApiProperty(id) invitedBy!: string;
+  @ApiProperty(date) createdAt!: Date;
+  @ApiProperty({ enum: invitationStatuses }) status!: (typeof invitationStatuses)[number];
 }
 
 export class ProvisionedOrganizationDto extends OrganizationDto {

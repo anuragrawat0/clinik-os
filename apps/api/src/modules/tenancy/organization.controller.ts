@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   Req,
 } from '@nestjs/common';
 import {
@@ -18,17 +19,19 @@ import {
   ApiNoContentResponse,
   ApiOkResponse,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { Require } from '../../core/access/access';
+import { CurrentAuth } from '../../core/auth';
 import { parseInput } from '../../core/errors/http-validation';
 import {
   CurrentTenant,
   type TenantOperation,
 } from '../../core/tenancy-context/request-transaction';
-import { ClientIpResolver, requestMetaFrom } from '../identity/core';
+import { ClientIpResolver, requestMetaFrom, type SessionContext } from '../identity/core';
 import { InvitationService } from './invitation.service';
 import { MemberService } from './member.service';
 import { OrganizationService } from './organization.service';
@@ -36,6 +39,7 @@ import {
   BranchDto,
   CreateBranchDto,
   InvitationDeliveryDto,
+  InvitationListItemDto,
   MemberDto,
   OrganizationDto,
   OwnershipTransferDto,
@@ -45,6 +49,7 @@ import {
   UpdateOrganizationDto,
   createBranchInput,
   createInvitationInput,
+  invitationListQuery,
   ownershipTransferInput,
   replaceRolesInput,
   resourceId,
@@ -150,6 +155,22 @@ export class OrganizationController {
     return this.members.list(tenant);
   }
 
+  @Get('invitations')
+  @Require('member.list')
+  @ApiQuery({
+    name: 'status',
+    enum: ['pending', 'all'],
+    required: false,
+    schema: { default: 'pending' },
+  })
+  @ApiOkResponse({ type: [InvitationListItemDto] })
+  listInvitations(
+    @CurrentTenant() tenant: TenantOperation,
+    @Query() query: unknown,
+  ): Promise<InvitationListItemDto[]> {
+    return this.invitations.list(tenant, parseInput(invitationListQuery, query).status);
+  }
+
   @Post('invitations')
   @Require('member.manage')
   @ApiBody({ type: StaffInvitationDto })
@@ -196,6 +217,7 @@ export class OrganizationController {
   @ApiParam({ name: 'userId', type: String, format: 'uuid' })
   @ApiBody({ type: ReplaceRolesDto })
   @ApiNoContentResponse()
+  @ApiResponse({ status: 422, description: 'Branch is inactive' })
   replaceRoles(
     @CurrentTenant() tenant: TenantOperation,
     @Param('userId') userId: string,
@@ -229,14 +251,20 @@ export class OrganizationController {
   @HttpCode(204)
   @ApiBody({ type: OwnershipTransferDto })
   @ApiNoContentResponse()
+  @ApiResponse({
+    status: 401,
+    description: 'Session unavailable or revoked after failed reauthentication',
+  })
   @ApiResponse({ status: 422, description: 'Current password is incorrect' })
   transferOwnership(
     @CurrentTenant() tenant: TenantOperation,
+    @CurrentAuth() auth: SessionContext,
     @Body() body: unknown,
     @Req() req: Request,
   ): Promise<void> {
     return this.members.transferOwnership(
       tenant,
+      auth.sessionId,
       parseInput(ownershipTransferInput, body),
       requestMetaFrom(req, this.ipResolver),
     );

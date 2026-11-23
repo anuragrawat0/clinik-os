@@ -13,7 +13,9 @@ import {
   AuthTokenService,
   PasswordService,
   RESET_TOKEN_TTL_MS,
+  SESSION_ABSOLUTE_TIMEOUT_MS,
   SessionService,
+  STAFF_IDLE_TIMEOUT_MS,
   TokenService,
   VERIFY_TOKEN_TTL_MS,
 } from '../../src/modules/identity/core';
@@ -711,6 +713,80 @@ describe('staff invitation HTTP', () => {
     expect(rows[0].password_hash).toBe(passwordHash);
   });
 
+  it.each([
+    {
+      reason: 'logout-revoked',
+      invalidate: async (_userId, cookie) => {
+        await post('/logout').set('Cookie', cookie).expect(204);
+      },
+    },
+    {
+      reason: 'password-reset-revoked',
+      invalidate: async (userId) => {
+        const token = await authTokens.issue(userId, 'password_reset');
+        await post('/password/reset').send({ token, password: newPassword }).expect(204);
+      },
+    },
+    {
+      reason: 'other-org-removal-revoked',
+      invalidate: async (userId) => {
+        const owner = await accessUser({ orgId: organizationB, roles: [ownerRole] });
+        await harness.adminPool.query(
+          'INSERT INTO organization_members (organization_id, user_id) VALUES ($1, $2)',
+          [organizationB, userId],
+        );
+        await call('delete', `/orgs/${organizationB}/members/${userId}`, owner.cookie).expect(204);
+      },
+    },
+    {
+      reason: 'idle-expired',
+      invalidate: () => clock.advance(STAFF_IDLE_TIMEOUT_MS),
+    },
+    {
+      reason: 'absolute-expired',
+      invalidate: async (userId) => {
+        // Isolate the absolute deadline with a fixture whose idle deadline is still in the future.
+        await harness.adminPool.query(
+          "UPDATE sessions SET idle_expires_at = absolute_expires_at + interval '1 minute' WHERE user_id = $1",
+          [userId],
+        );
+        clock.advance(SESSION_ABSOLUTE_TIMEOUT_MS);
+      },
+    },
+  ] satisfies {
+    reason: string;
+    invalidate: (userId: string, cookie: string) => void | Promise<void>;
+  }[])(
+    'rejects an existing-user invitation with a $reason cookie without rotating',
+    async ({ invalidate }) => {
+      const user = await createUser();
+      const cookie = await signIn(user.email);
+      await invalidate(user.id, cookie);
+      const invitation = await createInvitation(user.email);
+      const sessionRows = () =>
+        harness.adminPool.query(
+          'SELECT id, revoked_at FROM sessions WHERE user_id = $1 ORDER BY id',
+          [user.id],
+        );
+      const before = await sessionRows();
+      expect(before.rows).toHaveLength(1);
+      const rotate = vi.spyOn(app.get(SessionService), 'rotate');
+      try {
+        const rejected = await post(invitation.path + '/accept')
+          .set('Cookie', cookie)
+          .send({})
+          .expect(401);
+        assertProblem(rejected, 'UNAUTHENTICATED');
+        expect(rejected.headers['set-cookie']).toBeUndefined();
+        expect(rotate).not.toHaveBeenCalled();
+        expect((await sessionRows()).rows).toEqual(before.rows);
+      } finally {
+        rotate.mockRestore();
+      }
+      await get(invitation.path).expect(200);
+    },
+  );
+
   it('returns the same secret-free 404 for malformed, unknown, cross-tenant, expired, revoked and accepted links', async () => {
     const email = 'unavailable@clinik.test';
     const valid = await createInvitation(email);
@@ -884,6 +960,7 @@ describe('provisioning and tenant access', () => {
       ['get', `/branches/${branch}`],
       ['patch', `/branches/${branch}`],
       ['get', '/members'],
+      ['get', '/invitations'],
       ['post', '/invitations'],
       ['delete', `/invitations/${randomUUID()}`],
       ['put', `/members/${noRole.id}/roles`],
@@ -1246,7 +1323,10 @@ describe('provisioning and tenant access', () => {
         ])
       ).rows,
     ).toEqual([{ failed_login_count: 0 }]);
-    await assertAuditActions([['organization.ownership_transferred', organizationA]]);
+    await assertAuditActions([
+      ['org.ownership_transfer.denied', organizationA],
+      ['organization.ownership_transferred', organizationA],
+    ]);
   });
 
   it('suspends a removed member, revokes all sessions and reactivates only the new role', async () => {

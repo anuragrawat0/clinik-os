@@ -251,7 +251,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: operations["OrganizationController_listInvitations"];
         put?: never;
         post: operations["OrganizationController_invite"];
         delete?: never;
@@ -581,6 +581,24 @@ export interface components {
             /** Format: date-time */
             joinedAt: string;
             roles: components["schemas"]["StaffAssignmentDto"][];
+        };
+        InvitationListItemDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: email */
+            email: string;
+            /** @enum {string} */
+            role: "org_owner" | "org_admin" | "branch_manager" | "doctor" | "receptionist";
+            /** Format: uuid */
+            branchId: string | null;
+            /** Format: date-time */
+            expiresAt: string;
+            /** Format: uuid */
+            invitedBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            status: "pending" | "accepted" | "revoked" | "expired";
         };
         StaffInvitationDto: {
             /** @enum {string} */
@@ -1260,6 +1278,43 @@ export interface operations {
             };
         };
     };
+    OrganizationController_listInvitations: {
+        parameters: {
+            query?: {
+                status?: "pending" | "all";
+            };
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationListItemDto"][];
+                };
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     OrganizationController_invite: {
         parameters: {
             query?: never;
@@ -1383,6 +1438,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Branch is inactive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     OrganizationController_removeMember: {
@@ -1435,6 +1497,13 @@ export interface operations {
         };
         responses: {
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Session unavailable or revoked after failed reauthentication */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

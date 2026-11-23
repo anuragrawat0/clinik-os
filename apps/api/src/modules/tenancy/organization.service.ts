@@ -1,9 +1,15 @@
+import { isStaffRole, rolePermissions, type Permission } from '@clinik/shared';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { DrizzleQueryError, and, eq, gt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { coversBranch, forbidden, notFound } from '../../core/access/access';
 import { AuditWriter, type AuditEvent } from '../../core/audit';
-import { branches, organizations } from '../../core/db/schema/m1a';
+import {
+  branches,
+  organizationMembers,
+  organizations,
+  staffRoleAssignments,
+} from '../../core/db/schema/m1a';
 import type { TenantTransaction } from '../../core/db/transaction-context';
 import type { TenantOperation } from '../../core/tenancy-context/request-transaction';
 import type { RequestMeta } from '../identity/core';
@@ -15,6 +21,15 @@ import {
 } from './tenancy.dto';
 
 export type OrganizationActor = { orgId: string; userId: string; tx: TenantTransaction };
+
+export async function lockOrganization(tx: TenantTransaction, orgId: string) {
+  const [org] = await tx
+    .select({ status: organizations.status })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .for('no key update');
+  return org ?? notFound();
+}
 
 export function isUniqueViolation(error: unknown, constraint: string): boolean {
   return (
@@ -88,8 +103,44 @@ export class OrganizationService {
 
   async get(tx: TenantTransaction, orgId: string, lock = false) {
     const query = tx.select().from(organizations).where(eq(organizations.id, orgId));
-    const [org] = await (lock ? query.for('update') : query);
+    const [org] = await (lock ? query.for('no key update') : query);
     return org ?? notFound();
+  }
+
+  async lockForMember(actor: TenantOperation, permission: Permission): Promise<TenantOperation> {
+    const org = await lockOrganization(actor.tx, actor.orgId);
+    if (org.status !== 'active') notFound();
+    const roles = await this.activeMemberRoles(actor, actor.userId);
+    if (!roles.some(({ role }) => rolePermissions[role][permission])) forbidden();
+    return { ...actor, roles };
+  }
+
+  async activeMemberRoles({ tx, orgId }: OrganizationActor, userId: string) {
+    const rows = await tx
+      .select({
+        id: staffRoleAssignments.id,
+        role: staffRoleAssignments.role,
+        branchId: staffRoleAssignments.branchId,
+      })
+      .from(organizationMembers)
+      .leftJoin(
+        staffRoleAssignments,
+        and(
+          eq(staffRoleAssignments.organizationId, organizationMembers.organizationId),
+          eq(staffRoleAssignments.userId, organizationMembers.userId),
+        ),
+      )
+      .where(
+        and(
+          eq(organizationMembers.organizationId, orgId),
+          eq(organizationMembers.userId, userId),
+          eq(organizationMembers.status, 'active'),
+        ),
+      );
+    if (!rows.length) notFound();
+    return rows.flatMap(({ id, role, branchId }) =>
+      id !== null && role !== null && isStaffRole(role) ? [{ id, role, branchId }] : [],
+    );
   }
 
   async update(
@@ -127,11 +178,16 @@ export class OrganizationService {
       .orderBy(branches.code);
   }
 
-  async getBranch({ tx, orgId }: OrganizationActor, branchId: string) {
-    const [branch] = await tx
+  async getBranch(
+    { tx, orgId }: Pick<OrganizationActor, 'tx' | 'orgId'>,
+    branchId: string,
+    lockStatus = false,
+  ) {
+    const query = tx
       .select()
       .from(branches)
       .where(and(eq(branches.organizationId, orgId), eq(branches.id, branchId)));
+    const [branch] = await (lockStatus ? query.for('share') : query);
     return branch ?? notFound();
   }
 
