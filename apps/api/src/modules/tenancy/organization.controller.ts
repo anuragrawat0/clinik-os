@@ -25,8 +25,10 @@ import {
 } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { Require } from '../../core/access/access';
+import { AuditLogPageDto, auditListQuery, listAuditLogs } from '../../core/audit/audit-reader';
 import { CurrentAuth } from '../../core/auth';
 import { parseInput } from '../../core/errors/http-validation';
+import { CursorPageQueries } from '../../core/pagination/cursor';
 import {
   CurrentTenant,
   type TenantOperation,
@@ -39,7 +41,7 @@ import {
   BranchDto,
   CreateBranchDto,
   InvitationDeliveryDto,
-  InvitationListItemDto,
+  InvitationPageDto,
   MemberDto,
   OrganizationDto,
   OwnershipTransferDto,
@@ -163,12 +165,37 @@ export class OrganizationController {
     required: false,
     schema: { default: 'pending' },
   })
-  @ApiOkResponse({ type: [InvitationListItemDto] })
+  @CursorPageQueries()
+  @ApiOkResponse({ type: InvitationPageDto })
+  @ApiResponse({ status: 400, description: 'Invalid filters or cursor' })
   listInvitations(
     @CurrentTenant() tenant: TenantOperation,
     @Query() query: unknown,
-  ): Promise<InvitationListItemDto[]> {
-    return this.invitations.list(tenant, parseInput(invitationListQuery, query).status);
+  ): Promise<InvitationPageDto> {
+    return this.invitations.list(tenant, parseInput(invitationListQuery, query));
+  }
+
+  @Get('audit-logs')
+  @Require('audit.read')
+  @CursorPageQueries()
+  @ApiQuery({ name: 'actorId', type: String, format: 'uuid', required: false })
+  @ApiQuery({
+    name: 'patientId',
+    type: String,
+    format: 'uuid',
+    required: false,
+    description: 'Filters existing audit history. Patient registry validation is planned for M3.',
+  })
+  @ApiQuery({ name: 'action', type: String, required: false })
+  @ApiQuery({ name: 'from', type: String, format: 'date-time', required: false })
+  @ApiQuery({ name: 'to', type: String, format: 'date-time', required: false })
+  @ApiOkResponse({ type: AuditLogPageDto })
+  @ApiResponse({ status: 400, description: 'Invalid filters or cursor' })
+  listAuditLogs(
+    @CurrentTenant() tenant: TenantOperation,
+    @Query() query: unknown,
+  ): Promise<AuditLogPageDto> {
+    return listAuditLogs(tenant, parseInput(auditListQuery, query));
   }
 
   @Post('invitations')

@@ -3,6 +3,7 @@ import { HttpException } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { z } from 'zod';
 import { notFound } from '../../core/access/access';
+import { pageLimit } from '../../core/pagination/cursor';
 
 const name = z
   .string()
@@ -105,8 +106,10 @@ const roleScopeValid = ({ role, branchId }: { role: string; branchId: string | n
 export const createInvitationInput = z.strictObject({ email, ...roleShape }).refine(roleScopeValid);
 export const invitationListQuery = z.strictObject({
   status: z.enum(['pending', 'all']).default('pending'),
+  cursor: z.unknown().optional(),
+  limit: pageLimit,
 });
-export type InvitationListFilter = z.output<typeof invitationListQuery>['status'];
+export type InvitationListQuery = z.output<typeof invitationListQuery>;
 const invitationStatuses = ['pending', 'accepted', 'revoked', 'expired'] as const;
 const assignmentInput = z.strictObject(roleShape).refine(roleScopeValid);
 export type StaffAssignment = z.output<typeof assignmentInput>;
@@ -182,6 +185,11 @@ export class InvitationListItemDto {
   @ApiProperty(id) invitedBy!: string;
   @ApiProperty(date) createdAt!: Date;
   @ApiProperty({ enum: invitationStatuses }) status!: (typeof invitationStatuses)[number];
+}
+
+export class InvitationPageDto {
+  @ApiProperty({ type: [InvitationListItemDto] }) items!: InvitationListItemDto[];
+  @ApiProperty({ type: String, nullable: true }) nextCursor!: string | null;
 }
 
 export class ProvisionedOrganizationDto extends OrganizationDto {

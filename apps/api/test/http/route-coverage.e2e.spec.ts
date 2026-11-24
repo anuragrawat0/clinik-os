@@ -1,14 +1,11 @@
 import 'reflect-metadata';
 import { createRequire } from 'node:module';
-import { Controller, Get, Post, RequestMethod, type INestApplication } from '@nestjs/common';
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
-import { ModulesContainer } from '@nestjs/core';
+import { Controller, Get, Post, type INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { PLATFORM_ADMIN, REQUIRED_PERMISSION } from '../../src/core/access/access';
-import { IS_PUBLIC_KEY } from '../../src/core/auth/public.decorator';
 import {
+  collectControllerRoutes,
   collectMountedRoutes,
   findUndeclaredRoutes,
   type ExpressLayer,
@@ -56,39 +53,9 @@ class ProbeController {
   }
 }
 
-interface RouteInfo {
-  method: string;
-  path: string;
-  isPublic: boolean;
-  permission?: unknown;
-  platformAdmin: boolean;
-  probe: boolean;
-}
-
-const methodNames: Record<number, string> = {
-  [RequestMethod.GET]: 'GET',
-  [RequestMethod.POST]: 'POST',
-  [RequestMethod.PUT]: 'PUT',
-  [RequestMethod.PATCH]: 'PATCH',
-  [RequestMethod.DELETE]: 'DELETE',
-  [RequestMethod.ALL]: 'ALL',
-  [RequestMethod.OPTIONS]: 'OPTIONS',
-  [RequestMethod.HEAD]: 'HEAD',
-};
-
-function joinPath(...parts: string[]): string {
-  return (
-    '/' +
-    parts
-      .map((part) => part.replace(/^\/+|\/+$/g, ''))
-      .filter(Boolean)
-      .join('/')
-  );
-}
-
 describe('route coverage: every route is @Public or behind SessionGuard', () => {
   let app: INestApplication;
-  let routes: RouteInfo[];
+  let routes: ReturnType<typeof collectControllerRoutes>;
 
   beforeAll(async () => {
     process.env.DATABASE_URL = 'postgresql://clinic_app:test@127.0.0.1:1/none';
@@ -111,37 +78,7 @@ describe('route coverage: every route is @Public or behind SessionGuard', () => 
     else process.env.NODE_ENV = previous;
     await app.init();
 
-    routes = [];
-    for (const nestModule of app.get(ModulesContainer).values()) {
-      for (const wrapper of nestModule.controllers.values()) {
-        const controller = wrapper.metatype as (new (...args: never[]) => object) | null;
-        if (!controller) continue;
-        const controllerPath = Reflect.getMetadata(PATH_METADATA, controller) as string | undefined;
-        const prototype = controller.prototype as Record<string, unknown>;
-        for (const name of Object.getOwnPropertyNames(prototype)) {
-          const handler = prototype[name];
-          if (typeof handler !== 'function' || name === 'constructor') continue;
-          const methodPath = Reflect.getMetadata(PATH_METADATA, handler) as string | undefined;
-          const method = Reflect.getMetadata(METHOD_METADATA, handler) as number | undefined;
-          if (methodPath === undefined || method === undefined) continue;
-          const isPublic =
-            Reflect.getMetadata(IS_PUBLIC_KEY, handler) === true ||
-            Reflect.getMetadata(IS_PUBLIC_KEY, controller) === true;
-          routes.push({
-            method: methodNames[method] ?? String(method),
-            path: joinPath('api/v1', controllerPath ?? '', methodPath),
-            isPublic,
-            permission:
-              Reflect.getMetadata(REQUIRED_PERMISSION, handler) ??
-              Reflect.getMetadata(REQUIRED_PERMISSION, controller),
-            platformAdmin:
-              Reflect.getMetadata(PLATFORM_ADMIN, handler) === true ||
-              Reflect.getMetadata(PLATFORM_ADMIN, controller) === true,
-            probe: controller === ProbeController,
-          });
-        }
-      }
-    }
+    routes = collectControllerRoutes(app);
   });
 
   afterAll(async () => {
@@ -183,7 +120,11 @@ describe('route coverage: every route is @Public or behind SessionGuard', () => 
 
   it('every protected route declares the access policy appropriate to its prefix', () => {
     const routesWithoutPolicy = routes.filter(
-      (route) => !route.isPublic && !route.probe && !route.permission && !route.platformAdmin,
+      (route) =>
+        !route.isPublic &&
+        route.controller !== ProbeController &&
+        !route.permission &&
+        !route.platformAdmin,
     );
     expect(routesWithoutPolicy.map(({ method, path }) => `${method} ${path}`).sort()).toEqual(
       [...AUTHENTICATED_ROUTES].sort(),

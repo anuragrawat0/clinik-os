@@ -1,10 +1,11 @@
 import 'reflect-metadata';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { Test } from '@nestjs/testing';
+import type { Permission, StaffRole } from '@clinik/shared';
 import { Pool, type PoolClient } from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +18,12 @@ import {
   organizationB,
   startDatabaseHarness,
 } from '../db/harness';
+import { matrixScopesFor } from '../fixtures/rbac-matrix';
+import {
+  collectControllerRoutes,
+  collectMountedRoutes,
+  type ExpressLayer,
+} from '../helpers/express-routes';
 
 /**
  * Independent review tests for M1b slice 2 (tenancy, provisioning, access core).
@@ -904,7 +911,8 @@ describe('P5(a) invitation listing behaviour', () => {
     const list = (cookie: string, query = '') =>
       call('get', `${orgPath}/invitations${query}`, cookie);
     const scoped = await list(manager.cookie, '?status=pending').expect(200);
-    expect(scoped.body).toEqual([
+    expect(scoped.body.nextCursor).toBeNull();
+    expect(scoped.body.items).toEqual([
       {
         id: pending.id,
         role: 'doctor',
@@ -919,7 +927,7 @@ describe('P5(a) invitation listing behaviour', () => {
     expect((await list(manager.cookie).expect(200)).body).toEqual(scoped.body);
     const all = await list(manager.cookie, '?status=all').expect(200);
     expect(
-      all.body.map(({ id, status }: { id: string; status: string }) => [id, status]).sort(),
+      all.body.items.map(({ id, status }: { id: string; status: string }) => [id, status]).sort(),
     ).toEqual(
       [
         [pending.id, 'pending'],
@@ -929,10 +937,10 @@ describe('P5(a) invitation listing behaviour', () => {
       ].sort(),
     );
     const organizationList = await list(owner.cookie, '?status=all').expect(200);
-    expect(organizationList.body.map(({ id }: { id: string }) => id).sort()).toEqual(
+    expect(organizationList.body.items.map(({ id }: { id: string }) => id).sort()).toEqual(
       [pending.id, other.id, orgWide.id, accepted.id, revoked.id, expired.id].sort(),
     );
-    expect(organizationList.body.map(({ id }: { id: string }) => id)).not.toContain(
+    expect(organizationList.body.items.map(({ id }: { id: string }) => id)).not.toContain(
       foreignInvite.id,
     );
     await call(
@@ -949,7 +957,7 @@ describe('P5(a) invitation listing behaviour', () => {
     expect(list?.responses['200']).toMatchObject({
       content: {
         'application/json': {
-          schema: { items: { $ref: '#/components/schemas/InvitationListItemDto' } },
+          schema: { $ref: '#/components/schemas/InvitationPageDto' },
         },
       },
     });
@@ -965,4 +973,531 @@ describe('P5(a) invitation listing behaviour', () => {
     expect(Object.keys(created.body).sort()).toEqual(['emailDelivery', 'expiresAt', 'id']);
     expect(JSON.stringify(created.body)).not.toMatch(/[A-Za-z0-9_-]{43}/);
   }, 30_000);
+});
+
+const orgPrefix = '/api/v1/orgs/:orgId';
+const platformPrefix = '/api/v1/admin/organizations';
+const testedRoles = [
+  'platform_admin',
+  'org_owner',
+  'org_admin',
+  'branch_manager',
+  'doctor',
+  'receptionist',
+  'member_without_role',
+] as const;
+const variants = ['own branch', 'other branch', 'other organization'] as const;
+type TestedRole = (typeof testedRoles)[number];
+type Variant = (typeof variants)[number];
+
+interface RouteFixture {
+  orgId: string;
+  branchId: string;
+  invitationId: string;
+  memberId: string;
+  ownershipId: string;
+  actorId: string;
+  patientId: string;
+}
+
+type ResourceKey = Exclude<keyof RouteFixture, 'orgId'>;
+interface RouteCase {
+  permission: Permission;
+  status: number;
+  branchScoped?: boolean;
+  resourceKeys?: readonly ResourceKey[];
+  body?: (fixture: RouteFixture) => Record<string, unknown>;
+}
+
+const platform = 'platform.org.manage';
+const routeCases: Record<string, RouteCase> = {
+  [`GET ${orgPrefix}`]: { permission: 'org.read', status: 200 },
+  [`PATCH ${orgPrefix}`]: {
+    permission: 'org.update',
+    status: 200,
+    body: () => ({ name: 'Updated' }),
+  },
+  [`GET ${orgPrefix}/branches`]: { permission: 'org.read', status: 200 },
+  [`POST ${orgPrefix}/branches`]: {
+    permission: 'branch.manage',
+    status: 201,
+    body: () => ({ code: 'NEW', name: 'New Branch', timezone: 'UTC' }),
+  },
+  [`GET ${orgPrefix}/branches/:id`]: {
+    permission: 'org.read',
+    status: 200,
+    resourceKeys: ['branchId'],
+  },
+  [`PATCH ${orgPrefix}/branches/:id`]: {
+    permission: 'branch.update',
+    status: 200,
+    branchScoped: true,
+    resourceKeys: ['branchId'],
+    body: () => ({ name: 'Updated Branch' }),
+  },
+  [`GET ${orgPrefix}/members`]: { permission: 'member.list', status: 200 },
+  [`GET ${orgPrefix}/invitations`]: { permission: 'member.list', status: 200 },
+  [`POST ${orgPrefix}/invitations`]: {
+    permission: 'member.manage',
+    status: 201,
+    branchScoped: true,
+    resourceKeys: ['branchId'],
+    body: ({ branchId }) => ({ branchId, role: 'doctor', email: 'new-invite@clinik.test' }),
+  },
+  [`DELETE ${orgPrefix}/invitations/:id`]: {
+    permission: 'member.manage',
+    status: 204,
+    branchScoped: true,
+    resourceKeys: ['invitationId'],
+  },
+  [`PUT ${orgPrefix}/members/:userId/roles`]: {
+    permission: 'member.manage',
+    status: 204,
+    branchScoped: true,
+    resourceKeys: ['memberId', 'branchId'],
+    body: ({ branchId }) => ({ roles: [{ role: 'receptionist', branchId }] }),
+  },
+  [`DELETE ${orgPrefix}/members/:userId`]: {
+    permission: 'member.manage',
+    status: 204,
+    branchScoped: true,
+    resourceKeys: ['memberId'],
+  },
+  [`POST ${orgPrefix}/ownership-transfer`]: {
+    permission: 'org.ownership.transfer',
+    status: 204,
+    resourceKeys: ['ownershipId'],
+    body: ({ ownershipId }) => ({ newOwnerUserId: ownershipId, currentPassword: password }),
+  },
+  [`GET ${orgPrefix}/audit-logs`]: {
+    permission: 'audit.read',
+    status: 200,
+    resourceKeys: ['actorId', 'patientId'],
+  },
+  [`GET ${platformPrefix}`]: { permission: platform, status: 200 },
+  [`POST ${platformPrefix}`]: {
+    permission: platform,
+    status: 201,
+    body: () => ({ slug: 'from-platform', name: 'From Platform', defaultTimezone: 'UTC' }),
+  },
+  [`GET ${platformPrefix}/:id`]: { permission: platform, status: 200 },
+  [`PATCH ${platformPrefix}/:id`]: {
+    permission: platform,
+    status: 200,
+    body: () => ({ name: 'Updated' }),
+  },
+  [`POST ${platformPrefix}/:id/suspend`]: { permission: platform, status: 200 },
+  [`POST ${platformPrefix}/:id/reactivate`]: { permission: platform, status: 200 },
+  [`POST ${platformPrefix}/:id/owner-invitation`]: {
+    permission: platform,
+    status: 201,
+    body: () => ({ email: 'first-owner@clinik.test' }),
+  },
+};
+
+function enumerateAccessRoutes() {
+  const { router } = app.getHttpAdapter().getInstance() as { router: { stack: ExpressLayer[] } };
+  const metadata = new Map(
+    collectControllerRoutes(app).map((route) => [`${route.method} ${route.path}`, route]),
+  );
+  return collectMountedRoutes(router.stack)
+    .filter(({ key }) => / (?:<nested>)?\/api\/v1\/(?:orgs|admin)(?:\/|$)/.test(key))
+    .map(({ key }) => ({ key, metadata: metadata.get(key), scenario: routeCases[key] }));
+}
+
+async function makeRouteFixture(orgId: string, branchId: string): Promise<RouteFixture> {
+  const target = await member({ orgId, roles: [{ role: 'doctor', branchId }] });
+  const candidate = await member({ orgId, roles: [{ role: 'doctor', branchId }] });
+  const invitation = await directInvitation({
+    orgId,
+    email: 'fixture-invitation@clinik.test',
+    role: 'doctor',
+    branchId,
+    invitedBy: target.id,
+  });
+  const patientId = randomUUID();
+  await harness.adminPool.query(
+    `INSERT INTO audit_logs
+        (organization_id, actor_user_id, actor_type, action, resource_type, patient_id, outcome)
+     VALUES ($1, $2, 'user', 'demo.view', 'patient', $3, 'success')`,
+    [orgId, candidate.id, patientId],
+  );
+  return {
+    orgId,
+    branchId,
+    invitationId: invitation.id,
+    memberId: target.id,
+    ownershipId: candidate.id,
+    actorId: candidate.id,
+    patientId,
+  };
+}
+
+function exerciseRoute(key: string, cookie: string, fixture: RouteFixture) {
+  const [verb, pattern] = key.split(' ') as [string, string];
+  const platformRoute = pattern.startsWith(platformPrefix);
+  const path = pattern
+    .replace(':orgId', fixture.orgId)
+    .replace(':userId', fixture.memberId)
+    .replace(
+      ':id',
+      platformRoute
+        ? fixture.orgId
+        : pattern.includes('/invitations/')
+          ? fixture.invitationId
+          : fixture.branchId,
+    );
+  const test = call(verb.toLowerCase() as Method, path, cookie);
+  if (pattern.endsWith('/audit-logs'))
+    test.query({ actorId: fixture.actorId, patientId: fixture.patientId });
+  const body = routeCases[key].body?.(fixture);
+  return body ? test.send(body) : test;
+}
+
+function expectedStatus(role: TestedRole, variant: Variant, route: RouteCase) {
+  const scopes = matrixScopesFor(route.permission);
+  const scope = role === 'member_without_role' ? undefined : scopes[role];
+  if (route.permission === platform) return scope === 'P' ? route.status : 404;
+  if (role === 'platform_admin' || variant === 'other organization') return 404;
+  if (!scope) return 403;
+  if (route.branchScoped && scope !== 'O') {
+    const hasBranchScope = scope === 'B' || (typeof scope !== 'string' && scope.includes('B'));
+    if (!hasBranchScope || variant !== 'own branch') return 403;
+  }
+  return route.status;
+}
+
+async function assertRouteAccess(
+  key: string,
+  scenario: RouteCase,
+  role: TestedRole,
+  variant: Variant,
+  cookie: string,
+  fixture: RouteFixture,
+) {
+  const status = expectedStatus(role, variant, scenario);
+  const response = await exerciseRoute(key, cookie, fixture);
+  expect(
+    response.status,
+    `${key} [${role}, ${variant}] expected ${status}, received ${response.status} (${response.body.code ?? 'response'})`,
+  ).toBe(status);
+  if (status === 403 || status === 404)
+    expect(response.body.code, key).toBe(status === 403 ? 'FORBIDDEN' : 'NOT_FOUND');
+}
+
+describe('D25 M1 authorization acceptance', () => {
+  it('has one scenario and the expected access metadata for every registered route', () => {
+    const routes = enumerateAccessRoutes();
+    expect(routes.map(({ key }) => key).sort()).toEqual(Object.keys(routeCases).sort());
+    for (const { key, metadata, scenario } of routes) {
+      expect(metadata?.isPublic, key).toBe(false);
+      if (scenario.permission === platform) {
+        expect(metadata?.platformAdmin, key).toBe(true);
+        expect(metadata?.permission, key).toBeUndefined();
+      } else {
+        expect(metadata?.platformAdmin, key).toBe(false);
+        expect(metadata?.permission, key).toBe(scenario.permission);
+      }
+    }
+  });
+
+  it.each(testedRoles.flatMap((role) => variants.map((variant) => ({ role, variant }))))(
+    '$role — $variant on every organization and platform route',
+    async ({ role, variant }) => {
+      const user =
+        role === 'platform_admin'
+          ? await member({ platform: true })
+          : await member({
+              orgId: organizationA,
+              roles:
+                role === 'member_without_role'
+                  ? []
+                  : [
+                      {
+                        role,
+                        branchId: role === 'org_owner' || role === 'org_admin' ? null : branchA,
+                      },
+                    ],
+            });
+      const orgId = variant === 'other organization' ? organizationB : organizationA;
+      const branchId =
+        variant === 'own branch'
+          ? branchA
+          : variant === 'other branch'
+            ? otherBranch
+            : foreignBranch;
+      const fixture = await makeRouteFixture(orgId, branchId);
+      for (const { key, scenario } of enumerateAccessRoutes()) {
+        await assertRouteAccess(key, scenario, role, variant, user.cookie, fixture);
+      }
+    },
+  );
+
+  it('detects a widened org.update grant in the PATCH /orgs/:orgId sweep (expected 403, received 200)', async () => {
+    const { rolePermissions: guardPermissions } = await import('@clinik/shared');
+    const grants = guardPermissions.branch_manager;
+    const key = `PATCH ${orgPrefix}`;
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const fixture = await makeRouteFixture(organizationA, branchA);
+    const check = () =>
+      assertRouteAccess(
+        key,
+        routeCases[key],
+        'branch_manager',
+        'own branch',
+        manager.cookie,
+        fixture,
+      );
+
+    await check();
+    expect(grants['org.update']).toBeUndefined();
+    try {
+      grants['org.update'] = 'O';
+      await expect(check()).rejects.toThrow(
+        `${key} [branch_manager, own branch] expected 403, received 200`,
+      );
+    } finally {
+      delete grants['org.update'];
+    }
+    await check();
+  });
+
+  it('returns 404 with a foreign organization or any foreign resource identifier', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const local = await makeRouteFixture(organizationA, branchA);
+    const foreign = await makeRouteFixture(organizationB, foreignBranch);
+    const tenantRoutes = enumerateAccessRoutes().filter(({ key }) => key.includes(orgPrefix));
+    expect(tenantRoutes.length).toBeGreaterThan(0);
+    for (const { key, scenario } of tenantRoutes) {
+      const crossOrg = await exerciseRoute(key, owner.cookie, foreign);
+      expect(crossOrg.status, key).toBe(404);
+      expect(crossOrg.body.code, key).toBe('NOT_FOUND');
+      for (const id of scenario.resourceKeys ?? []) {
+        const crossResource = await exerciseRoute(key, owner.cookie, {
+          ...local,
+          [id]: foreign[id],
+        });
+        expect(crossResource.status, `${key}: ${id}`).toBe(404);
+        expect(crossResource.body.code, `${key}: ${id}`).toBe('NOT_FOUND');
+      }
+    }
+  });
+
+  it('denies a branch manager assigning branch_manager at their own branch', async () => {
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const target = await member({ orgId: organizationA, roles: [doctorA] });
+    await call('put', `${orgPath}/members/${target.id}/roles`, manager.cookie)
+      .send({ roles: [managerRole] })
+      .expect(403);
+    await call('post', `${orgPath}/invitations`, manager.cookie)
+      .send({ ...managerRole, email: 'next-manager@clinik.test' })
+      .expect(403);
+  });
+
+  it('hides every organization route from the platform-only admin', async () => {
+    const platformAdmin = await member({ platform: true });
+    const fixture = await makeRouteFixture(organizationA, branchA);
+    for (const { key } of enumerateAccessRoutes().filter(({ key }) => key.includes(orgPrefix))) {
+      const response = await exerciseRoute(key, platformAdmin.cookie, fixture);
+      expect(response.status, key).toBe(404);
+      expect(response.body.code, key).toBe('NOT_FOUND');
+    }
+  });
+
+  it.each([
+    ['org_owner', 200],
+    ['org_admin', 200],
+    ['branch_manager', 403],
+    ['doctor', 403],
+    ['receptionist', 403],
+  ] satisfies [StaffRole, number][])('gives %s HTTP %s for audit access', async (role, status) => {
+    const user = await member({
+      orgId: organizationA,
+      roles: [
+        {
+          role,
+          branchId: role === 'org_owner' || role === 'org_admin' ? null : branchA,
+        },
+      ],
+    });
+    await call('get', `${orgPath}/audit-logs`, user.cookie).expect(status);
+  });
+});
+
+describe('M1 audit and invitation pagination', () => {
+  const firstInstant = '2026-11-23T10:00:00.123101Z';
+  const secondInstant = '2026-11-23T10:00:00.123902Z';
+  const cursorFor = (position: unknown) =>
+    Buffer.from(JSON.stringify(position)).toString('base64url');
+
+  it('projects safe audit fields, combines filters and pages across equal timestamps', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const patientId = randomUUID();
+    const events = await harness.adminPool.query<{ id: string }>(
+      `INSERT INTO audit_logs (
+        organization_id, occurred_at, actor_user_id, actor_type, action, resource_type,
+        resource_id, patient_id, outcome, changed_fields, branch_id, ip, user_agent, metadata
+      ) VALUES
+        ($1, $5, $3, 'user', 'record.view', 'chart', 'first', $4, 'success',
+          ARRAY['title'], $7, '192.0.2.5', 'test-agent', '{"private":"sensitive-value"}'),
+        ($1, $6, $3, 'user', 'record.view', 'chart', 'second', $4, 'success',
+          ARRAY['title'], $7, '192.0.2.5', 'test-agent', '{"private":"sensitive-value"}'),
+        ($1, $6, $3, 'user', 'record.view', 'chart', 'third', $4, 'success',
+          ARRAY['title'], $7, '192.0.2.5', 'test-agent', '{"private":"sensitive-value"}'),
+        ($1, $6, $3, 'user', 'another.action', 'chart', 'different-action', $4, 'success',
+          NULL, NULL, NULL, NULL, '{}'),
+        ($2, $6, $3, 'user', 'record.view', 'chart', 'foreign-row', $4, 'success',
+          NULL, NULL, NULL, NULL, '{}')
+      RETURNING id::text`,
+      [organizationA, organizationB, owner.id, patientId, firstInstant, secondInstant, branchA],
+    );
+    const filters = {
+      actorId: owner.id,
+      patientId,
+      action: 'record.view',
+      from: firstInstant,
+      to: secondInstant,
+    };
+    const query = () => call('get', `${orgPath}/audit-logs`, owner.cookie).query(filters);
+    const first = await query().query({ limit: 1 }).expect(200);
+    expect(first.body.items).toEqual([
+      {
+        id: events.rows[2].id,
+        occurredAt: secondInstant,
+        actorUserId: owner.id,
+        actorType: 'user',
+        action: 'record.view',
+        resourceType: 'chart',
+        resourceId: 'third',
+        outcome: 'success',
+        changedFields: ['title'],
+        branchId: branchA,
+      },
+    ]);
+    expect(first.body.nextCursor).toBe(cursorFor([secondInstant, events.rows[2].id]));
+    const next = await query().query({ cursor: first.body.nextCursor, limit: 2 }).expect(200);
+    expect(next.body.items.map(({ id }: { id: string }) => id)).toEqual([
+      events.rows[1].id,
+      events.rows[0].id,
+    ]);
+    expect(next.body.nextCursor).toBeNull();
+    const supplied = await query()
+      .query({ cursor: cursorFor([secondInstant, events.rows[4].id]) })
+      .expect(200);
+    expect(supplied.body.items.map(({ id }: { id: string }) => id)).toEqual([
+      events.rows[2].id,
+      events.rows[1].id,
+      events.rows[0].id,
+    ]);
+    for (const malformed of [
+      'not=base64url',
+      cursorFor([firstInstant]),
+      cursorFor(['2026-02-30T10:00:00Z', '1']),
+      cursorFor(['0000-11-23T10:00:00Z', '1']),
+      cursorFor([firstInstant, '9223372036854775808']),
+      cursorFor([firstInstant, '-1']),
+    ]) {
+      expect((await query().query({ cursor: malformed }).expect(400)).body.code).toBe(
+        'INVALID_CURSOR',
+      );
+    }
+    await query().query({ limit: 101 }).expect(400);
+    const bounded = await call('get', `${orgPath}/audit-logs`, owner.cookie)
+      .query({ ...filters, from: secondInstant })
+      .expect(200);
+    expect(bounded.body.items.map(({ id }: { id: string }) => id)).toEqual([
+      events.rows[2].id,
+      events.rows[1].id,
+    ]);
+  });
+
+  it('uses a 50-row default audit limit', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    await harness.adminPool.query(
+      `INSERT INTO audit_logs (organization_id, actor_type, action, resource_type, outcome)
+       SELECT $1, 'system', 'demo.action', 'demo', 'success' FROM generate_series(1, 51)`,
+      [organizationA],
+    );
+    const page = await call('get', `${orgPath}/audit-logs`, owner.cookie).expect(200);
+    expect(page.body.items).toHaveLength(50);
+    const next = await call('get', `${orgPath}/audit-logs`, owner.cookie)
+      .query({ cursor: page.body.nextCursor })
+      .expect(200);
+    expect(next.body.items).toHaveLength(1);
+    expect(next.body.nextCursor).toBeNull();
+  });
+
+  it('paginates invitations at equal timestamps and reads status from the query', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const setup = { role: 'doctor', branchId: branchA, invitedBy: owner.id };
+    const one = await directInvitation({ ...setup, email: 'one@clinik.test' });
+    const two = await directInvitation({ ...setup, email: 'two@clinik.test' });
+    await harness.adminPool.query('UPDATE invitations SET created_at = $1 WHERE id IN ($2, $3)', [
+      firstInstant,
+      one.id,
+      two.id,
+    ]);
+    const query = () => call('get', `${orgPath}/invitations`, owner.cookie);
+    const expected = [one.id, two.id].sort();
+    const first = await query().query({ limit: 1 }).expect(200);
+    expect(first.body.items.map(({ id }: { id: string }) => id)).toEqual([expected[0]]);
+    expect(first.body.nextCursor).toBe(cursorFor([firstInstant, expected[0]]));
+    const next = await query().query({ cursor: first.body.nextCursor, limit: 1 }).expect(200);
+    expect(next.body.items.map(({ id }: { id: string }) => id)).toEqual([expected[1]]);
+    expect(next.body.nextCursor).toBeNull();
+    const all = await query().query({ status: 'all', cursor: first.body.nextCursor }).expect(200);
+    expect(all.body.items.map(({ id }: { id: string }) => id)).toEqual([expected[1]]);
+    expect(
+      (
+        await query()
+          .query({ cursor: cursorFor([firstInstant, 'invalid-uuid']) })
+          .expect(400)
+      ).body.code,
+    ).toBe('INVALID_CURSOR');
+    expect(
+      (
+        await call('get', `${orgPath}/audit-logs`, owner.cookie)
+          .query({ cursor: first.body.nextCursor })
+          .expect(400)
+      ).body.code,
+    ).toBe('INVALID_CURSOR');
+  });
+
+  it('reapplies invitation tenant, branch and status filters to a supplied position', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const setup = { role: 'doctor', invitedBy: owner.id };
+    const own = await directInvitation({
+      ...setup,
+      email: 'local-pending@clinik.test',
+      branchId: branchA,
+    });
+    const revoked = await directInvitation({
+      ...setup,
+      email: 'local-revoked@clinik.test',
+      branchId: branchA,
+    });
+    await directInvitation({ ...setup, email: 'other-branch@clinik.test', branchId: otherBranch });
+    const foreign = await directInvitation({
+      ...setup,
+      orgId: organizationB,
+      email: 'foreign-pending@clinik.test',
+      branchId: foreignBranch,
+    });
+    await harness.adminPool.query('UPDATE invitations SET revoked_at = now() WHERE id = $1', [
+      revoked.id,
+    ]);
+    await harness.adminPool.query('UPDATE invitations SET created_at = $1 WHERE id <> $2', [
+      firstInstant,
+      foreign.id,
+    ]);
+    await harness.adminPool.query('UPDATE invitations SET created_at = $1 WHERE id = $2', [
+      secondInstant,
+      foreign.id,
+    ]);
+    const page = await call('get', `${orgPath}/invitations`, manager.cookie)
+      .query({ cursor: cursorFor([secondInstant, foreign.id]), status: 'pending' })
+      .expect(200);
+    expect(page.body.items.map(({ id }: { id: string }) => id)).toEqual([own.id]);
+  });
 });

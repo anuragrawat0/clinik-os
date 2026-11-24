@@ -15,6 +15,7 @@
     "test": "pnpm --filter @clinik/api test",
     "db:migrate": "pnpm --filter @clinik/api db:migrate",
     "db:rollback": "pnpm --filter @clinik/api db:rollback",
+    "admin:create": "node apps/api/dist/cli/create-admin.js",
     "api:openapi": "pnpm --filter @clinik/api openapi:generate",
     "api:client": "pnpm --filter @clinik/web api:client",
     "boundary:check": "depcruise --config dependency-cruiser.config.cjs apps/api/src apps/web/src packages/shared/src --output-type err"

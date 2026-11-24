@@ -1,4 +1,4 @@
-import { rolePermissions, type Permission } from '@clinik/shared';
+import { hasScope, rolePermissions, type Permission } from '@clinik/shared';
 import { HttpException, SetMetadata } from '@nestjs/common';
 import type { RequestTenant } from '../tenancy-context/request-transaction';
 
@@ -22,6 +22,20 @@ export function coversBranch(
 ): boolean {
   return tenant.roles.some(({ role, branchId: assignedBranch }) => {
     const scope = rolePermissions[role][permission];
-    return scope === 'O' || (scope === 'B' && branchId !== null && branchId === assignedBranch);
+    return (
+      hasScope(scope, 'O') ||
+      (hasScope(scope, 'B') && branchId !== null && branchId === assignedBranch)
+    );
   });
+}
+
+/** Apply after tenant, permission and role checks. Identifiers must come from trusted lookups. */
+export function ownsResource(
+  actor: { userId: string; doctorId?: string | null },
+  resource: { doctorId?: string | null; patientAccountUserId?: string | null },
+): boolean {
+  return (
+    (resource.doctorId != null && resource.doctorId === actor.doctorId) ||
+    (resource.patientAccountUserId != null && resource.patientAccountUserId === actor.userId)
+  );
 }

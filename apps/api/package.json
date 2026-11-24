@@ -13,6 +13,7 @@
     "worker:start": "node dist/worker.js",
     "db:migrate": "node dist/core/db/migrate.js up",
     "db:rollback": "node dist/core/db/migrate.js down",
+    "admin:create": "node dist/cli/create-admin.js",
     "openapi:generate": "tsx src/core/openapi/generate.ts",
     "lint": "eslint src test",
     "typecheck": "tsc --noEmit -p tsconfig.json",
