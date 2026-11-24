@@ -1,6 +1,6 @@
 import { canGrant } from '@clinik/shared';
 import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
-import { DrizzleQueryError, and, desc, eq, gt, inArray, isNull, lte, or } from 'drizzle-orm';
+import { DrizzleQueryError, and, desc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { coversBranch, forbidden } from '../../core/access/access';
 import { AuditWriter } from '../../core/audit';
@@ -17,6 +17,7 @@ import {
 } from '../../core/db/schema/m1a';
 import { withTenantTransaction, type TenantTransaction } from '../../core/db/transaction-context';
 import { parseInput } from '../../core/errors/http-validation';
+import { cursorPage, cursorTimestamp, readCursor } from '../../core/pagination/cursor';
 import type { TenantOperation } from '../../core/tenancy-context/request-transaction';
 import {
   PasswordService,
@@ -36,12 +37,13 @@ import {
 } from './organization.service';
 import type {
   InvitationDeliveryDto,
-  InvitationListItemDto,
-  InvitationListFilter,
+  InvitationListQuery,
+  InvitationPageDto,
   StaffAssignment,
 } from './tenancy.dto';
 
 const invitationLink = z.tuple([z.guid(), z.string().regex(/^[A-Za-z0-9_-]{43}$/)]);
+const invitationCursorId = z.guid();
 const invitationTtlMs = 7 * 24 * 60 * 60 * 1000;
 
 interface IssuedInvitation {
@@ -81,9 +83,10 @@ export class InvitationService {
 
   async list(
     actor: TenantOperation,
-    filter: InvitationListFilter,
-  ): Promise<InvitationListItemDto[]> {
+    { status, cursor, limit }: InvitationListQuery,
+  ): Promise<InvitationPageDto> {
     const now = this.clock.now();
+    const since = readCursor(cursor, invitationCursorId);
     const coveredBranches = actor.roles.flatMap(({ branchId }) =>
       branchId !== null && coversBranch(actor, 'member.list', branchId) ? [branchId] : [],
     );
@@ -95,7 +98,7 @@ export class InvitationService {
         branchId: invitations.branchId,
         expiresAt: invitations.expiresAt,
         invitedBy: invitations.invitedBy,
-        createdAt: invitations.createdAt,
+        cursorAt: cursorTimestamp(invitations.createdAt),
         acceptedAt: invitations.acceptedAt,
         revokedAt: invitations.revokedAt,
       })
@@ -106,26 +109,36 @@ export class InvitationService {
           coversBranch(actor, 'member.list', null)
             ? undefined
             : inArray(invitations.branchId, coveredBranches),
-          filter === 'pending'
+          status === 'pending'
             ? and(
                 isNull(invitations.acceptedAt),
                 isNull(invitations.revokedAt),
                 gt(invitations.expiresAt, now),
               )
             : undefined,
+          since
+            ? sql`(${invitations.createdAt} < ${since.at}::timestamptz OR
+                (${invitations.createdAt} = ${since.at}::timestamptz AND ${invitations.id} > ${since.id}::uuid))`
+            : undefined,
         ),
       )
-      .orderBy(desc(invitations.createdAt), invitations.id);
-    return rows.map(({ acceptedAt, revokedAt, ...row }) => ({
-      ...row,
-      status: acceptedAt
-        ? 'accepted'
-        : revokedAt
-          ? 'revoked'
-          : row.expiresAt <= now
-            ? 'expired'
-            : 'pending',
-    }));
+      .orderBy(desc(invitations.createdAt), invitations.id)
+      .limit(limit + 1);
+    const page = cursorPage(rows, limit);
+    return {
+      nextCursor: page.nextCursor,
+      items: page.items.map(({ acceptedAt, revokedAt, cursorAt, ...row }) => ({
+        ...row,
+        createdAt: new Date(cursorAt),
+        status: acceptedAt
+          ? 'accepted'
+          : revokedAt
+            ? 'revoked'
+            : row.expiresAt <= now
+              ? 'expired'
+              : 'pending',
+      })),
+    };
   }
 
   async issueStaff(

@@ -260,6 +260,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{orgId}/audit-logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["OrganizationController_listAuditLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{orgId}/invitations/{id}": {
         parameters: {
             query?: never;
@@ -599,6 +615,32 @@ export interface components {
             createdAt: string;
             /** @enum {string} */
             status: "pending" | "accepted" | "revoked" | "expired";
+        };
+        InvitationPageDto: {
+            items: components["schemas"]["InvitationListItemDto"][];
+            nextCursor: string | null;
+        };
+        AuditLogDto: {
+            /** @description Audit ID as a decimal string */
+            id: string;
+            /** Format: date-time */
+            occurredAt: string;
+            /** Format: uuid */
+            actorUserId: string | null;
+            /** @enum {string} */
+            actorType: "user" | "system" | "webhook";
+            action: string;
+            resourceType: string;
+            resourceId: string | null;
+            /** @enum {string} */
+            outcome: "success" | "denied" | "error";
+            changedFields: string[] | null;
+            /** Format: uuid */
+            branchId: string | null;
+        };
+        AuditLogPageDto: {
+            items: components["schemas"]["AuditLogDto"][];
+            nextCursor: string | null;
         };
         StaffInvitationDto: {
             /** @enum {string} */
@@ -1281,6 +1323,9 @@ export interface operations {
     OrganizationController_listInvitations: {
         parameters: {
             query?: {
+                /** @description Opaque page cursor */
+                cursor?: string;
+                limit?: number;
                 status?: "pending" | "all";
             };
             header?: never;
@@ -1296,8 +1341,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["InvitationListItemDto"][];
+                    "application/json": components["schemas"]["InvitationPageDto"];
                 };
+            };
+            /** @description Invalid filters or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Permission denied */
             403: {
@@ -1361,6 +1413,58 @@ export interface operations {
             };
             /** @description Branch is inactive */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    OrganizationController_listAuditLogs: {
+        parameters: {
+            query?: {
+                to?: string;
+                from?: string;
+                action?: string;
+                /** @description Filters existing audit history. Patient registry validation is planned for M3. */
+                patientId?: string;
+                actorId?: string;
+                /** @description Opaque page cursor */
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                orgId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditLogPageDto"];
+                };
+            };
+            /** @description Invalid filters or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Permission denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Resource unavailable */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
