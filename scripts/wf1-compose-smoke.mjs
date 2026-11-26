@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 
+const projectName = process.env.COMPOSE_PROJECT_NAME?.trim() ?? '';
+if (!/^[a-z0-9][a-z0-9_-]*$/.test(projectName) || projectName === 'clinik-os') {
+  console.error('WF-1 requires a valid COMPOSE_PROJECT_NAME other than clinik-os.');
+  process.exit(1);
+}
+
 const web = new URL(process.env.SMOKE_WEB_URL ?? 'http://127.0.0.1:3000').origin;
 const mailpit = new URL(process.env.SMOKE_MAILPIT_URL ?? 'http://127.0.0.1:8025').origin;
 const artifacts = resolve(process.env.SMOKE_ARTIFACT_DIR ?? 'wf1-artifacts');
@@ -27,11 +33,15 @@ let step = 'bootstrap platform administrator';
 let browser;
 
 function compose(args, options = {}) {
-  const result = spawnSync('docker', ['compose', '--env-file', '.env.example', ...args], {
-    encoding: 'utf8',
-    timeout: 60_000,
-    ...options,
-  });
+  const result = spawnSync(
+    'docker',
+    ['compose', '-p', projectName, '--env-file', '.env.example', ...args],
+    {
+      encoding: 'utf8',
+      timeout: 60_000,
+      ...options,
+    },
+  );
   if (result.error || result.status !== 0) throw new Error('Compose command failed');
   return result.stdout.trim();
 }
@@ -199,6 +209,15 @@ async function workflow() {
   const receptionist = await acceptInvitation('receptionist');
 
   step = 'check the manager’s branch scope and grant restrictions';
+  await manager
+    .getByRole('navigation', { name: 'Clinic navigation' })
+    .getByRole('link', { name: 'Members' })
+    .click();
+  const staff = manager.getByRole('table', { name: 'Staff members' });
+  const managerDoctorRow = staff.getByRole('row').filter({ hasText: people.doctor.email });
+  const removeDoctor = managerDoctorRow.getByRole('button', { name: 'Remove', exact: true });
+  await check(removeDoctor).toBeVisible();
+
   await owner.reload();
   const ownerDoctorRow = owner.getByRole('row').filter({ hasText: people.doctor.email });
   await ownerDoctorRow.getByRole('button', { name: 'Edit roles' }).click();
@@ -208,11 +227,7 @@ async function workflow() {
   await check(editor).toBeHidden();
   await check(ownerDoctorRow.getByText('Doctor · Branch B', { exact: true })).toBeVisible();
 
-  await manager
-    .getByRole('navigation', { name: 'Clinic navigation' })
-    .getByRole('link', { name: 'Members' })
-    .click();
-  const staff = manager.getByRole('table', { name: 'Staff members' });
+  await manager.reload();
   await check(staff.getByRole('row')).toHaveCount(4);
   const managerOwnerRow = staff.getByRole('row').filter({ hasText: people.owner.email });
   await check(managerOwnerRow.getByRole('listitem')).toHaveText([
@@ -222,9 +237,8 @@ async function workflow() {
   await check(staff.getByRole('row').filter({ hasText: people.manager.email })).toContainText(
     'Branch manager · Branch A',
   );
-  await check(staff.getByRole('row').filter({ hasText: people.doctor.email })).toContainText(
-    'Doctor · Branch A',
-  );
+  await check(managerDoctorRow).toContainText('Doctor · Branch A');
+  await check(removeDoctor).toHaveCount(0);
   await check(staff.getByText('Doctor · Branch B', { exact: true })).toHaveCount(0);
   await check(staff.getByText(people.receptionist.email, { exact: true })).toHaveCount(0);
 

@@ -11,7 +11,6 @@ import { clinicKey, clinicParams, useBranches, useMembers } from './clinic-data'
 import {
   canEditRoles,
   canManageBranch,
-  canRemoveMember,
   hasPermission,
   roleAssignmentHints,
   roleLabel,
@@ -62,8 +61,6 @@ function MemberWorkspace() {
   );
   const refresh = () => cache.invalidateQueries({ queryKey: clinicKey(orgId) });
   const close = () => setDialog(undefined);
-  // Hidden assignments can make a member ineligible for removal by a branch-scoped viewer.
-  const fullMemberAccess = canManageBranch(roles, 'member.manage', null);
 
   return (
     <>
@@ -178,7 +175,7 @@ function MemberWorkspace() {
                                 Edit roles
                               </Button>
                             )}
-                            {fullMemberAccess && canRemoveMember(roles, member.roles, isSelf) && (
+                            {member.canRemove && (
                               <Button
                                 type="button"
                                 tone="quiet"
@@ -373,7 +370,7 @@ function RoleEditor({
       title={`Edit roles for ${member.fullName}`}
       submit="Save roles"
       submitDisabled={
-        isSelf && (assignments.length === 0 || assignments.length === member.roles.length)
+        assignments.length === 0 || (isSelf && assignments.length === member.roles.length)
       }
       onClose={onClose}
       action={() => save(assignments)}

@@ -246,7 +246,7 @@ export class OrganizationController {
   @ApiNoContentResponse()
   @ApiResponse({
     status: 422,
-    description: 'Branch is inactive or self-edit removes the last role',
+    description: 'Branch is inactive or the resulting role set is empty (LAST_ROLE or EMPTY_ROLES)',
   })
   replaceRoles(
     @CurrentTenant() tenant: TenantOperation,

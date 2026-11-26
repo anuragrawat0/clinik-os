@@ -9,6 +9,7 @@ node_modules/
 dist/
 dist-server/
 .next/
+/apps/web/next-env.d.ts
 coverage/
 .turbo/
 *.tsbuildinfo

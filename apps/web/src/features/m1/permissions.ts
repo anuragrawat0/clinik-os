@@ -93,17 +93,3 @@ export function canEditRoles(
     target.every(({ branchId }) => canManageBranch(actor, 'member.manage', branchId ?? null))
   );
 }
-
-export function canRemoveMember(
-  actor: readonly RoleScope[],
-  target: readonly MemberRole[],
-  isSelf: boolean,
-): boolean {
-  return (
-    !isSelf &&
-    outranksStaffMember(actor, target) &&
-    (canManageBranch(actor, 'member.manage', null) ||
-      (target.length > 0 &&
-        target.every(({ branchId }) => canManageBranch(actor, 'member.manage', branchId ?? null))))
-  );
-}

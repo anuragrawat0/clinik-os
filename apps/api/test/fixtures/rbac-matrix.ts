@@ -1,4 +1,4 @@
-import type { Permission, Role } from '@clinik/shared';
+import type { Permission, Role, StaffRole } from '@clinik/shared';
 
 /**
  * Independent conformance table transcribed by hand from docs/RBAC_MATRIX.md (v1.2).
@@ -417,3 +417,11 @@ export function matrixScopesFor(permission: Permission): Expected {
   if (!row) throw new Error(`No RBAC matrix row for ${permission}`);
   return row.scopes;
 }
+
+export const matrixStaffRanks: Readonly<Record<StaffRole, number>> = {
+  org_owner: 4,
+  org_admin: 3,
+  branch_manager: 2,
+  doctor: 1,
+  receptionist: 1,
+};

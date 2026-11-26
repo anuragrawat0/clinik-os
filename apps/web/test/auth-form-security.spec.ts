@@ -13,7 +13,9 @@ const invitePath = `/invite/${inviteToken}`;
 const inviteApi = `/api/v1/auth/invitations/${inviteToken}`;
 
 function hasCredentials(url: URL) {
-  return [...url.searchParams.keys()].some((name) => /^(password|email|token)$/i.test(name));
+  return [...url.searchParams.keys()].some((name) =>
+    /^(password|email|token|access_token|code)$/i.test(name),
+  );
 }
 
 async function checkPostForm(button: Locator) {
@@ -95,6 +97,47 @@ test('unexpected credential parameters vanish without appearing on the page', as
   for (const value of [password, email, 'unused']) {
     expect(await page.locator('body').innerText()).not.toContain(value);
   }
+});
+
+for (const [path, cleanPath] of [
+  ['/login', '/login'],
+  ['/reset-password', '/reset-password'],
+  ['/verify-email', '/verify-email'],
+  ['/forgot-password', '/forgot-password'],
+  ['/invite', '/invite'],
+  [invitePath, '/invite'],
+]) {
+  test(`auth query allowlist strips every unexpected parameter on ${path}`, async ({ page }) => {
+    await page.route(`**${inviteApi}`, (route) => route.fulfill({ status: 404 }));
+    await page.goto(
+      `${web}${path}?access_token=synthetic&code=synthetic&extra=yes&token=synthetic`,
+    );
+    await expect(page).toHaveURL(`${web}${cleanPath}`);
+  });
+}
+
+test('login retains only a valid reason and same-origin next path', async ({ page }) => {
+  await page.goto(
+    `${web}/login?reason=session-ended&next=%2Fapp&access_token=synthetic&code=synthetic`,
+  );
+  await expect(page).toHaveURL(
+    (url) =>
+      url.pathname === '/login' &&
+      url.searchParams.size === 2 &&
+      url.searchParams.get('reason') === 'session-ended' &&
+      url.searchParams.get('next') === '/app',
+  );
+  for (const next of [
+    'https://example.test/app',
+    '//example.test/app',
+    '/\\example.test/app',
+    '/app?code=synthetic',
+  ]) {
+    await page.goto(`${web}/login?next=${encodeURIComponent(next)}&reason=anything-else`);
+    await expect(page).toHaveURL(`${web}/login`);
+  }
+  await page.goto(`${web}/login?next=%2Fapp&next=%2Fother`);
+  await expect(page).toHaveURL(`${web}/login`);
 });
 
 async function submitByEnter({
