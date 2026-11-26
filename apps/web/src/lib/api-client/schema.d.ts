@@ -600,6 +600,8 @@ export interface components {
             roles: components["schemas"]["StaffAssignmentDto"][];
             /** @description Whether the viewer can edit this member’s roles */
             canEditRoles: boolean;
+            /** @description Whether the viewer can remove this member */
+            canRemove: boolean;
         };
         InvitationListItemDto: {
             /** Format: uuid */
@@ -1548,7 +1550,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Branch is inactive or self-edit removes the last role */
+            /** @description Branch is inactive or the resulting role set is empty (LAST_ROLE or EMPTY_ROLES) */
             422: {
                 headers: {
                     [name: string]: unknown;

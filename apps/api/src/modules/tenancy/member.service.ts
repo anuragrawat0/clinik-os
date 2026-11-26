@@ -34,6 +34,20 @@ function canEditOtherRoles(actor: TenantOperation, target: readonly StaffAssignm
   );
 }
 
+function canRemoveMember(
+  actor: TenantOperation,
+  userId: string,
+  target: readonly StaffAssignment[],
+): boolean {
+  return (
+    actor.userId !== userId &&
+    outranksStaffMember(actor.roles, target) &&
+    (coversBranch(actor, 'member.manage', null) ||
+      (target.length > 0 &&
+        target.every(({ branchId }) => coversBranch(actor, 'member.manage', branchId))))
+  );
+}
+
 @Injectable()
 export class MemberService {
   private readonly reauthFailures = new Map<string, { count: number }>();
@@ -76,7 +90,7 @@ export class MemberService {
       .orderBy(users.fullName, users.id, staffRoleAssignments.role, staffRoleAssignments.branchId);
     const members = new Map<
       string,
-      Omit<MemberDto, 'roles' | 'canEditRoles'> & { roles: StaffAssignment[] }
+      Omit<MemberDto, 'roles' | 'canEditRoles' | 'canRemove'> & { roles: StaffAssignment[] }
     >();
     const orgWide = coversBranch(actor, 'member.list', null);
     for (const { role, branchId, ...fields } of rows) {
@@ -97,7 +111,14 @@ export class MemberService {
         (member.userId === actor.userId
           ? member.roles.length > 1 && member.roles.some(({ role }) => role !== 'org_owner')
           : canEditOtherRoles(actor, member.roles));
-      return [{ ...member, roles, canEditRoles }];
+      return [
+        {
+          ...member,
+          roles,
+          canEditRoles,
+          canRemove: canRemoveMember(actor, member.userId, member.roles),
+        },
+      ];
     });
   }
 
@@ -112,6 +133,7 @@ export class MemberService {
     const oldRoles = await this.organization.activeMemberRoles(locked, userId);
     const self = userId === locked.userId;
     if (!self && !canEditOtherRoles(locked, oldRoles)) forbidden();
+    if (!self && roles.length === 0) throw new HttpException({ code: 'EMPTY_ROLES' }, 422);
     const oldKeys = new Set(oldRoles.map(roleKey));
     const newKeys = new Set(roles.map(roleKey));
     const added = roles.filter((role) => !oldKeys.has(roleKey(role)));
@@ -176,13 +198,7 @@ export class MemberService {
     const locked = await this.organization.lockForMember(actor, 'member.manage');
     const { orgId, tx } = locked;
     const target = await this.organization.activeMemberRoles(locked, userId);
-    if (!outranksStaffMember(locked.roles, target)) forbidden();
-    if (
-      !coversBranch(locked, 'member.manage', null) &&
-      (!target.length ||
-        target.some(({ branchId }) => !coversBranch(locked, 'member.manage', branchId)))
-    )
-      forbidden();
+    if (!canRemoveMember(locked, userId, target)) forbidden();
 
     await tx
       .update(organizationMembers)

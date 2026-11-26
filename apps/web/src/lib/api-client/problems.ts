@@ -11,6 +11,7 @@ const messages: Readonly<Record<string, string>> = {
   INVALID_PASSWORD: 'The current password is incorrect.',
   INVALID_CREDENTIALS: 'Unable to sign in. Check your email and password.',
   SELF_GRANT_FORBIDDEN: 'You cannot change your own roles.',
+  EMPTY_ROLES: 'Keep at least one role or use Remove to remove this member from the clinic.',
   RATE_LIMITED: 'Too many attempts. Wait a moment and try again.',
   UNAUTHENTICATED: 'Your session ended. Sign in again to continue.',
   VALIDATION_ERROR: 'Check the fields and try again.',

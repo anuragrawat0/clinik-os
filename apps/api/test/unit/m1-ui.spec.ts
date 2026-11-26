@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   canEditRoles,
   canManageBranch,
-  canRemoveMember,
   organizationNavigation,
   roleAssignmentHints,
   roleOptions,
@@ -66,14 +65,6 @@ describe('clinic staff role options', () => {
       expect.arrayContaining([{ role: 'org_admin', branchId: null }, ...branchRoles]),
     );
     expect(roleOptions([doctor], branches)).toEqual([]);
-  });
-
-  it('rejects self, peer and higher-rank removal and checks every assigned branch', () => {
-    expect(canRemoveMember([owner], [{ role: 'doctor', branchId: 'A' }], true)).toBe(false);
-    expect(canRemoveMember([admin], [{ role: 'org_owner' }], false)).toBe(false);
-    expect(canRemoveMember([admin], [{ role: 'org_admin' }], false)).toBe(false);
-    expect(canRemoveMember([manager], [{ role: 'doctor', branchId: 'B' }], false)).toBe(false);
-    expect(canRemoveMember([owner], [{ role: 'receptionist', branchId: 'B' }], false)).toBe(true);
   });
 });
 
@@ -140,6 +131,7 @@ describe('problem details display', () => {
     ['INVALID_TIMEZONE', 'time zone'],
     ['INVALID_PASSWORD', 'password is incorrect'],
     ['SELF_GRANT_FORBIDDEN', 'your own roles'],
+    ['EMPTY_ROLES', 'Keep at least one role'],
     ['RATE_LIMITED', 'Too many attempts'],
     ['UNAUTHENTICATED', 'Your session ended'],
   ])('maps %s to a safe message', (code, copy) => {

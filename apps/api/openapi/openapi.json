@@ -1030,7 +1030,7 @@
             "description": "Resource unavailable"
           },
           "422": {
-            "description": "Branch is inactive or self-edit removes the last role"
+            "description": "Branch is inactive or the resulting role set is empty (LAST_ROLE or EMPTY_ROLES)"
           }
         },
         "security": [
@@ -2064,6 +2064,10 @@
           "canEditRoles": {
             "type": "boolean",
             "description": "Whether the viewer can edit this member’s roles"
+          },
+          "canRemove": {
+            "type": "boolean",
+            "description": "Whether the viewer can remove this member"
           }
         },
         "required": [
@@ -2072,7 +2076,8 @@
           "fullName",
           "joinedAt",
           "roles",
-          "canEditRoles"
+          "canEditRoles",
+          "canRemove"
         ]
       },
       "InvitationListItemDto": {

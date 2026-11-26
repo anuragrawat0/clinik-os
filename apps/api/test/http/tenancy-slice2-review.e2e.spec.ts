@@ -18,7 +18,7 @@ import {
   organizationB,
   startDatabaseHarness,
 } from '../db/harness';
-import { matrixScopesFor } from '../fixtures/rbac-matrix';
+import { matrixScopesFor, matrixStaffRanks } from '../fixtures/rbac-matrix';
 import {
   collectControllerRoutes,
   collectMountedRoutes,
@@ -489,6 +489,33 @@ describe('P3: branch scope', () => {
     expect(visibleRoles(target.id)).toEqual([doctorA]);
   }, 30_000);
 
+  it('projects removal eligibility from all assignments and matches DELETE', async () => {
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const local = await member({ orgId: organizationA, roles: [doctorA] });
+    const mixed = await member({ orgId: organizationA, roles: [doctorA, doctorB] });
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const admin = await member({ orgId: organizationA, roles: [adminRole] });
+    const list = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
+    const visible = (id: string) =>
+      list.body.find(({ userId }: { userId: string }) => userId === id);
+    expect(visible(local.id)).toMatchObject({ roles: [doctorA], canRemove: true });
+    expect(visible(mixed.id)).toMatchObject({ roles: [doctorA], canRemove: false });
+    expect(visible(manager.id)).toMatchObject({ canRemove: false });
+    expect(visible(owner.id)).toMatchObject({ canRemove: false });
+
+    const orgList = await call('get', `${orgPath}/members`, admin.cookie).expect(200);
+    expect(
+      orgList.body.find(({ userId }: { userId: string }) => userId === owner.id),
+    ).toMatchObject({ canRemove: false });
+    expect(
+      orgList.body.find(({ userId }: { userId: string }) => userId === mixed.id),
+    ).toMatchObject({ canRemove: true });
+    await call('delete', `${orgPath}/members/${mixed.id}`, manager.cookie).expect(403);
+    expect(await auditRowsForOrg()).toEqual([]);
+    await call('delete', `${orgPath}/members/${local.id}`, manager.cookie).expect(204);
+    expect(await auditRowsForOrg()).toMatchObject([{ action: 'member.removed' }]);
+  }, 30_000);
+
   it('EXPECTED DESIGN: replacing roles must reject a role on an inactive branch', async () => {
     const owner = await member({ orgId: organizationA, roles: [ownerRole] });
     const target = await member({ orgId: organizationA });
@@ -556,6 +583,21 @@ describe('P3: branch scope', () => {
 });
 
 describe('grant and escalation negatives', () => {
+  it('requires DELETE to remove another member’s final role', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const target = await member({ orgId: organizationA, roles: [doctorA] });
+    const result = await call('put', `${orgPath}/members/${target.id}/roles`, owner.cookie)
+      .send({ roles: [] })
+      .expect(422);
+    expect(result.body.code).toBe('EMPTY_ROLES');
+    const members = await call('get', `${orgPath}/members`, owner.cookie).expect(200);
+    expect(
+      members.body.find(({ userId }: { userId: string }) => userId === target.id),
+    ).toMatchObject({ roles: [doctorA], canRemove: true });
+    expect(await auditRowsForOrg()).toEqual([]);
+    await call('delete', `${orgPath}/members/${target.id}`, owner.cookie).expect(204);
+  });
+
   it('requires a higher rank before replacing a member’s roles', async () => {
     const owner = await member({ orgId: organizationA, roles: [ownerRole] });
     const admin = await member({ orgId: organizationA, roles: [adminRole] });
@@ -1120,16 +1162,18 @@ interface RouteFixture {
   branchId: string;
   invitationId: string;
   memberId: string;
+  memberRole: StaffRole;
   ownershipId: string;
   actorId: string;
   patientId: string;
 }
 
-type ResourceKey = Exclude<keyof RouteFixture, 'orgId'>;
+type ResourceKey = Exclude<keyof RouteFixture, 'orgId' | 'memberRole'>;
 interface RouteCase {
   permission: Permission;
   status: number;
   branchScoped?: boolean;
+  rankedTarget?: boolean;
   resourceKeys?: readonly ResourceKey[];
   body?: (fixture: RouteFixture) => Record<string, unknown>;
 }
@@ -1179,13 +1223,17 @@ const routeCases: Record<string, RouteCase> = {
     permission: 'member.manage',
     status: 204,
     branchScoped: true,
+    rankedTarget: true,
     resourceKeys: ['memberId', 'branchId'],
-    body: ({ branchId }) => ({ roles: [{ role: 'receptionist', branchId }] }),
+    body: ({ memberRole, branchId }) => ({
+      roles: [fixtureAssignment(memberRole, branchId), { role: 'receptionist', branchId }],
+    }),
   },
   [`DELETE ${orgPrefix}/members/:userId`]: {
     permission: 'member.manage',
     status: 204,
     branchScoped: true,
+    rankedTarget: true,
     resourceKeys: ['memberId'],
   },
   [`POST ${orgPrefix}/ownership-transfer`]: {
@@ -1230,8 +1278,16 @@ function enumerateAccessRoutes() {
     .map(({ key }) => ({ key, metadata: metadata.get(key), scenario: routeCases[key] }));
 }
 
-async function makeRouteFixture(orgId: string, branchId: string): Promise<RouteFixture> {
-  const target = await member({ orgId, roles: [{ role: 'doctor', branchId }] });
+function fixtureAssignment(role: StaffRole, branchId: string) {
+  return { role, branchId: role === 'org_owner' || role === 'org_admin' ? null : branchId };
+}
+
+async function makeRouteFixture(
+  orgId: string,
+  branchId: string,
+  memberRole: StaffRole = 'doctor',
+): Promise<RouteFixture> {
+  const target = await member({ orgId, roles: [fixtureAssignment(memberRole, branchId)] });
   const candidate = await member({ orgId, roles: [{ role: 'doctor', branchId }] });
   const invitation = await directInvitation({
     orgId,
@@ -1252,6 +1308,7 @@ async function makeRouteFixture(orgId: string, branchId: string): Promise<RouteF
     branchId,
     invitationId: invitation.id,
     memberId: target.id,
+    memberRole,
     ownershipId: candidate.id,
     actorId: candidate.id,
     patientId,
@@ -1279,7 +1336,12 @@ function exerciseRoute(key: string, cookie: string, fixture: RouteFixture) {
   return body ? test.send(body) : test;
 }
 
-function expectedStatus(role: TestedRole, variant: Variant, route: RouteCase) {
+function expectedStatus(
+  role: TestedRole,
+  variant: Variant,
+  route: RouteCase,
+  memberRole: StaffRole,
+) {
   const scopes = matrixScopesFor(route.permission);
   const scope = role === 'member_without_role' ? undefined : scopes[role];
   if (route.permission === platform) return scope === 'P' ? route.status : 404;
@@ -1289,6 +1351,8 @@ function expectedStatus(role: TestedRole, variant: Variant, route: RouteCase) {
     const hasBranchScope = scope === 'B' || (typeof scope !== 'string' && scope.includes('B'));
     if (!hasBranchScope || variant !== 'own branch') return 403;
   }
+  if (route.rankedTarget && matrixStaffRanks[role as StaffRole] <= matrixStaffRanks[memberRole])
+    return 403;
   return route.status;
 }
 
@@ -1300,7 +1364,7 @@ async function assertRouteAccess(
   cookie: string,
   fixture: RouteFixture,
 ) {
-  const status = expectedStatus(role, variant, scenario);
+  const status = expectedStatus(role, variant, scenario, fixture.memberRole);
   const response = await exerciseRoute(key, cookie, fixture);
   expect(
     response.status,
@@ -1308,6 +1372,7 @@ async function assertRouteAccess(
   ).toBe(status);
   if (status === 403 || status === 404)
     expect(response.body.code, key).toBe(status === 403 ? 'FORBIDDEN' : 'NOT_FOUND');
+  return status;
 }
 
 describe('D25 M1 authorization acceptance', () => {
@@ -1386,6 +1451,39 @@ describe('D25 M1 authorization acceptance', () => {
     }
     await check();
   });
+
+  it.each([
+    { role: 'org_admin', memberRole: 'doctor' },
+    { role: 'org_admin', memberRole: 'org_admin' },
+    { role: 'org_admin', memberRole: 'org_owner' },
+    { role: 'branch_manager', memberRole: 'doctor' },
+    { role: 'branch_manager', memberRole: 'branch_manager' },
+    { role: 'branch_manager', memberRole: 'org_admin' },
+  ] as const)(
+    'checks role changes and removal by $role targeting $memberRole',
+    async ({ role, memberRole }) => {
+      const user = await member({
+        orgId: organizationA,
+        roles: [fixtureAssignment(role, branchA)],
+      });
+      const fixture = await makeRouteFixture(organizationA, branchA, memberRole);
+      const rankedRoutes = enumerateAccessRoutes().filter(({ scenario }) => scenario.rankedTarget);
+      expect(rankedRoutes).toHaveLength(2);
+      for (const { key, scenario } of rankedRoutes) {
+        const before = await auditRowsForOrg();
+        const status = await assertRouteAccess(
+          key,
+          scenario,
+          role,
+          'own branch',
+          user.cookie,
+          fixture,
+        );
+        if (status === 403) expect(await auditRowsForOrg()).toEqual(before);
+        else expect(await auditRowsForOrg()).toHaveLength(before.length + 1);
+      }
+    },
+  );
 
   it('returns 404 with a foreign organization or any foreign resource identifier', async () => {
     const owner = await member({ orgId: organizationA, roles: [ownerRole] });
