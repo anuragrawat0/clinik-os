@@ -139,9 +139,7 @@ async function openForm(browser, url, heading) {
       browser.evaluate(
         (title) =>
           document.querySelector('h1')?.textContent === title &&
-          Object.keys(document.querySelector('form') ?? {}).some((key) =>
-            key.startsWith('__reactProps$'),
-          ),
+          document.querySelector('form button[type="submit"]:enabled') !== null,
         heading,
       ),
     `Form did not load for ${heading}`,

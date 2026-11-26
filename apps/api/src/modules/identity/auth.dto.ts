@@ -77,6 +77,9 @@ class MembershipDto {
   organizationName!: string;
 
   @ApiProperty({ type: String })
+  organizationSlug!: string;
+
+  @ApiProperty({ type: String })
   status!: string;
 
   @ApiProperty({ type: String })

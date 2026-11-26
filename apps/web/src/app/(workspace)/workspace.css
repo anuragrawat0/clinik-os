@@ -1,0 +1,250 @@
+.m1-workspace {
+  min-height: 100svh;
+  background: var(--paper);
+}
+.m1-workspace :focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+.m1-top,
+.m1-heading,
+.m1-header-actions,
+.m1-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.m1-top {
+  min-height: 70px;
+  justify-content: space-between;
+  padding: 12px max(24px, calc((100vw - 1320px) / 2));
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.m1-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+.m1-switch select {
+  max-width: 260px;
+}
+.m1-user {
+  position: relative;
+}
+.m1-user summary {
+  cursor: pointer;
+  padding: 8px 4px;
+  font-weight: 650;
+}
+.m1-user > div {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  min-width: 220px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.m1-user a,
+.m1-table a,
+.m1-back {
+  color: var(--green);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.m1-columns {
+  max-width: 1368px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(165px, 230px) minmax(0, 1fr);
+  min-height: calc(100svh - 70px);
+}
+.m1-sidebar {
+  padding: 32px 20px;
+  border-right: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.m1-sidebar nav {
+  display: grid;
+  gap: 5px;
+  margin-top: 18px;
+}
+.m1-sidebar a {
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+.m1-sidebar a[aria-current='page'],
+.m1-sidebar a:hover {
+  background: var(--mint);
+  color: var(--ink);
+}
+.m1-main {
+  min-width: 0;
+  padding: 32px clamp(20px, 4vw, 54px) 56px;
+}
+.m1-main--wide {
+  max-width: 1160px;
+  margin: 0 auto;
+}
+.m1-heading {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  margin: 12px 0 24px;
+}
+.m1-heading h1 {
+  font-size: clamp(30px, 4vw, 46px);
+  overflow-wrap: anywhere;
+}
+.m1-workspace h2 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.025em;
+}
+.m1-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 20px;
+  margin: 0 0 20px;
+}
+.m1-panel > h2 {
+  margin-bottom: 14px;
+}
+.m1-field,
+.m1-form,
+.m1-form fieldset {
+  display: grid;
+  gap: 12px;
+}
+.m1-field {
+  gap: 5px;
+  font-size: 14px;
+  font-weight: 650;
+}
+.m1-form fieldset {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+.m1-workspace input:not([type='checkbox']),
+.m1-workspace select {
+  min-width: 0;
+  min-height: 40px;
+  padding: 7px 9px;
+  border: 1px solid #a7b8ac;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 400;
+}
+.m1-workspace button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.m1-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.m1-muted,
+.m1-empty {
+  color: var(--ink-soft);
+}
+.m1-notice {
+  padding: 10px 12px;
+  background: var(--mint);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.m1-error {
+  background: #fff2ee;
+  color: #8d2d2d;
+}
+.m1-dialog {
+  width: min(480px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  color: var(--ink);
+  padding: 22px;
+}
+.m1-dialog::backdrop {
+  background: rgb(14 36 29 / 44%);
+}
+.m1-dialog h2 {
+  margin-bottom: 15px;
+}
+.m1-dialog p {
+  margin: 0;
+}
+.m1-dialog .m1-actions {
+  justify-content: flex-end;
+  margin-top: 5px;
+}
+.m1-table-region {
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.m1-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.m1-table :is(th, td) {
+  text-align: left;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.m1-table th {
+  background: #eef5ef;
+}
+.m1-table tr:last-child td {
+  border-bottom: 0;
+}
+.m1-table ul {
+  padding-inline-start: 16px;
+  margin: 0;
+}
+.m1-pagination {
+  margin-top: 16px;
+}
+.m1-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 18px;
+}
+.m1-tabs [aria-pressed='true'] {
+  background: var(--mint);
+  color: var(--ink);
+}
+.m1-inline-form {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+.m1-checkboxes {
+  display: grid;
+  gap: 8px;
+  max-height: 15rem;
+  overflow: auto;
+}
+.m1-checkboxes label {
+  display: flex;
+  gap: 8px;
+  align-items: start;
+}

@@ -40,6 +40,7 @@ export class AuthProfileService {
         .select({
           organizationId: organizationMembers.organizationId,
           organizationName: organizations.name,
+          organizationSlug: organizations.slug,
           status: organizationMembers.status,
           organizationStatus: organizations.status,
           role: staffRoleAssignments.role,

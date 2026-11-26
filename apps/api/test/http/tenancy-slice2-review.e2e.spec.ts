@@ -473,15 +473,20 @@ describe('P3: branch scope', () => {
     await call('delete', `${orgPath}/members/${branchBMember.id}`, manager.cookie).expect(403);
   }, 30_000);
 
-  it('EXPECTED DESIGN: a branch manager must not see roles from unmanaged branches', async () => {
+  it('shows clinic-wide and managed-branch roles to a branch manager', async () => {
     const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const owner = await member({ orgId: organizationA, roles: [ownerRole, doctorB] });
+    const admin = await member({ orgId: organizationA, roles: [adminRole, doctorB] });
     const target = await member({
       orgId: organizationA,
       roles: [doctorA, doctorB],
     });
     const members = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
-    const entry = members.body.find(({ userId }: { userId: string }) => userId === target.id);
-    expect(entry?.roles).toEqual([doctorA]);
+    const visibleRoles = (id: string) =>
+      members.body.find(({ userId }: { userId: string }) => userId === id)?.roles;
+    expect(visibleRoles(owner.id)).toEqual([ownerRole]);
+    expect(visibleRoles(admin.id)).toEqual([adminRole]);
+    expect(visibleRoles(target.id)).toEqual([doctorA]);
   }, 30_000);
 
   it('EXPECTED DESIGN: replacing roles must reject a role on an inactive branch', async () => {
@@ -551,6 +556,126 @@ describe('P3: branch scope', () => {
 });
 
 describe('grant and escalation negatives', () => {
+  it('requires a higher rank before replacing a member’s roles', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const admin = await member({ orgId: organizationA, roles: [adminRole] });
+    const otherAdmin = await member({ orgId: organizationA, roles: [doctorB, adminRole] });
+    const manager = await member({ orgId: organizationA, roles: [managerRole] });
+    const otherManager = await member({ orgId: organizationA, roles: [managerRole] });
+    const doctor = await member({ orgId: organizationA, roles: [doctorA] });
+    const mixed = await member({ orgId: organizationA, roles: [doctorA, doctorB] });
+    const receptionist = { role: 'receptionist', branchId: branchA };
+    const replace = (
+      cookie: string,
+      id: string,
+      roles: { role: string; branchId: string | null }[],
+    ) => call('put', `${orgPath}/members/${id}/roles`, cookie).send({ roles });
+
+    const denied = [
+      [admin.cookie, owner.id, [ownerRole, doctorA]],
+      [admin.cookie, otherAdmin.id, [adminRole, doctorB, doctorA]],
+      [manager.cookie, otherAdmin.id, [adminRole, doctorB, doctorA]],
+      [manager.cookie, otherManager.id, [managerRole, doctorA]],
+      [manager.cookie, mixed.id, [doctorA, doctorB, receptionist]],
+      [doctor.cookie, manager.id, [managerRole, doctorA]],
+    ] as const;
+    for (const [cookie, id, roles] of denied)
+      expect((await replace(cookie, id, [...roles]).expect(403)).body.code).toBe('FORBIDDEN');
+    expect(await auditRowsForOrg()).toEqual([]);
+
+    const branchMembers = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
+    const branchRow = (id: string) =>
+      branchMembers.body.find(({ userId }: { userId: string }) => userId === id);
+    expect(branchRow(doctor.id)).toMatchObject({ roles: [doctorA], canEditRoles: true });
+    expect(branchRow(mixed.id)).toMatchObject({ roles: [doctorA], canEditRoles: false });
+
+    await replace(owner.cookie, otherAdmin.id, [adminRole, doctorA]).expect(204);
+    await replace(manager.cookie, doctor.id, [doctorA, receptionist]).expect(204);
+    const members = await call('get', `${orgPath}/members`, owner.cookie).expect(200);
+    const savedRoles = (id: string) =>
+      members.body.find(({ userId }: { userId: string }) => userId === id)?.roles;
+    expect(savedRoles(owner.id)).toEqual([ownerRole]);
+    expect(savedRoles(otherAdmin.id)).toEqual([doctorA, adminRole]);
+    expect(savedRoles(doctor.id)).toEqual([doctorA, receptionist]);
+  }, 30_000);
+
+  it('permits only strict self-removal of non-owner roles while preserving a role', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole, managerRole] });
+    const admin = await member({ orgId: organizationA, roles: [adminRole] });
+    const manager = await member({ orgId: organizationA, roles: [managerRole, doctorB] });
+    const replaceSelf = (
+      user: { id: string; cookie: string },
+      roles: readonly { role: string; branchId: string | null }[],
+    ) => call('put', `${orgPath}/members/${user.id}/roles`, user.cookie).send({ roles });
+    for (const roles of [
+      [ownerRole, managerRole, doctorA],
+      [ownerRole, managerRole],
+      [ownerRole, doctorB],
+    ])
+      expect((await replaceSelf(owner, roles).expect(403)).body.code).toBe('SELF_GRANT_FORBIDDEN');
+    expect((await replaceSelf(owner, [managerRole]).expect(403)).body.code).toBe('FORBIDDEN');
+    expect((await replaceSelf(admin, []).expect(422)).body.code).toBe('LAST_ROLE');
+    expect(await auditRowsForOrg()).toEqual([]);
+
+    const branchMembers = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
+    expect(
+      branchMembers.body.find(({ userId }: { userId: string }) => userId === manager.id),
+    ).toMatchObject({ roles: [managerRole], canEditRoles: true });
+    await replaceSelf(manager, [managerRole]).expect(204);
+    await replaceSelf(owner, [ownerRole]).expect(204);
+    expect((await replaceSelf(owner, []).expect(403)).body.code).toBe('FORBIDDEN');
+    const members = await call('get', `${orgPath}/members`, owner.cookie).expect(200);
+    expect(
+      members.body.find(({ userId }: { userId: string }) => userId === owner.id),
+    ).toMatchObject({ roles: [ownerRole], canEditRoles: false });
+    expect(await auditRowsForOrg()).toMatchObject([
+      { action: 'member.roles_replaced', metadata: { self: true }, changed_fields: ['roles'] },
+      { action: 'member.roles_replaced', metadata: { self: true }, changed_fields: ['roles'] },
+    ]);
+  }, 30_000);
+
+  it('checks a target’s promoted rank after an admin’s PUT waits for the organization lock', async () => {
+    const admin = await member({ orgId: organizationA, roles: [adminRole] });
+    const target = await member({ orgId: organizationA, roles: [doctorA] });
+    const gate = await harness.adminPool.connect();
+    try {
+      await gate.query('BEGIN');
+      await gate.query('SELECT id FROM organizations WHERE id = $1 FOR NO KEY UPDATE', [
+        organizationA,
+      ]);
+      const {
+        rows: [{ pid }],
+      } = await gate.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const replace = Promise.resolve(
+        call('put', `${orgPath}/members/${target.id}/roles`, admin.cookie).send({
+          roles: [doctorA, adminRole, { role: 'receptionist', branchId: branchA }],
+        }),
+      );
+      void replace.catch(() => undefined);
+      try {
+        await waitForBlockedBy(pid);
+        await gate.query(
+          "INSERT INTO staff_role_assignments (organization_id, user_id, role) VALUES ($1, $2, 'org_admin')",
+          [organizationA, target.id],
+        );
+        await gate.query('COMMIT');
+        const result = await replace;
+        expect(result.status).toBe(403);
+        expect(result.body.code).toBe('FORBIDDEN');
+      } finally {
+        await gate.query('ROLLBACK');
+        await replace.catch(() => undefined);
+      }
+    } finally {
+      gate.release();
+    }
+    const members = await call('get', `${orgPath}/members`, admin.cookie).expect(200);
+    expect(
+      members.body.find(({ userId }: { userId: string }) => userId === target.id),
+    ).toMatchObject({ roles: [doctorA, adminRole], canEditRoles: false });
+    expect(await auditRowsForOrg()).toEqual([]);
+  }, 30_000);
+
   it('no tenant route can grant org_owner or org_admin outside the platform owner-invite endpoint', async () => {
     const owner = await member({ orgId: organizationA, roles: [ownerRole] });
     const admin = await member({ orgId: organizationA, roles: [adminRole] });
@@ -1366,6 +1491,8 @@ describe('M1 audit and invitation pagination', () => {
         occurredAt: secondInstant,
         actorUserId: owner.id,
         actorType: 'user',
+        actorLabel: 'member',
+        actorName: fullName,
         action: 'record.view',
         resourceType: 'chart',
         resourceId: 'third',

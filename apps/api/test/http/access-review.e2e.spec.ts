@@ -116,6 +116,7 @@ async function insertAudit(rows: {
   orgId?: string;
   occurredAt: string;
   actorUserId?: string | null;
+  actorType?: 'user' | 'system';
   action?: string;
   resourceId?: string;
   patientId?: string | null;
@@ -127,12 +128,13 @@ async function insertAudit(rows: {
     `INSERT INTO audit_logs (
        organization_id, occurred_at, actor_user_id, actor_type, action, resource_type,
        resource_id, patient_id, outcome, changed_fields, branch_id, ip, user_agent, metadata
-     ) VALUES ($1, $2, $3, 'user', $4, 'chart', $5, $6, 'success', ARRAY['title'], $7, $8, $9, $10)
+     ) VALUES ($1, $2, $3, $4, $5, 'chart', $6, $7, 'success', ARRAY['title'], $8, $9, $10, $11)
      RETURNING id::text`,
     [
       rows.orgId ?? organizationA,
       rows.occurredAt,
       rows.actorUserId ?? null,
+      rows.actorType ?? 'user',
       rows.action ?? 'record.view',
       rows.resourceId ?? 'resource',
       rows.patientId ?? null,
@@ -220,6 +222,8 @@ describe('P4 audit log authorization and projection', () => {
         'occurredAt',
         'actorUserId',
         'actorType',
+        'actorLabel',
+        'actorName',
         'action',
         'resourceType',
         'resourceId',
@@ -235,6 +239,45 @@ describe('P4 audit log authorization and projection', () => {
       'sentinel-metadata-marker',
     ])
       expect(serialized).not.toContain(sentinel);
+  });
+
+  it('resolves clinic and removed members without disclosing outside actors’ names', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const former = await member({ orgId: organizationA, roles: [doctorA] });
+    const foreign = await member({ orgId: organizationB, roles: [ownerRole] });
+    const formerName = 'Synthetic Removed Staff';
+    const foreignName = 'Synthetic Foreign Staff';
+    await harness.adminPool.query('UPDATE users SET full_name = $2 WHERE id = $1', [
+      former.id,
+      formerName,
+    ]);
+    await harness.adminPool.query('UPDATE users SET full_name = $2 WHERE id = $1', [
+      foreign.id,
+      foreignName,
+    ]);
+
+    const occurredAt = '2026-11-23T10:00:00.000001Z';
+    const currentId = await insertAudit({ occurredAt, actorUserId: owner.id });
+    const formerId = await insertAudit({ occurredAt, actorUserId: former.id });
+    const foreignId = await insertAudit({ occurredAt, actorUserId: foreign.id });
+    const systemId = await insertAudit({ occurredAt, actorType: 'system', actorUserId: owner.id });
+    await call('delete', `${orgPath}/members/${former.id}`, owner.cookie).expect(204);
+
+    const { body } = await call('get', `${orgPath}/audit-logs`, owner.cookie)
+      .query({ action: 'record.view' })
+      .expect(200);
+    const labels = body.items.map(({ id, actorLabel, actorName }: Record<string, unknown>) => ({
+      id,
+      actorLabel,
+      actorName,
+    }));
+    expect(labels).toEqual([
+      { id: systemId, actorLabel: 'system', actorName: null },
+      { id: foreignId, actorLabel: null, actorName: null },
+      { id: formerId, actorLabel: 'former_member', actorName: formerName },
+      { id: currentId, actorLabel: 'member', actorName: fullName },
+    ]);
+    expect(JSON.stringify(body)).not.toContain(foreignName);
   });
 
   it('re-applies org and filters to a supplied position and rejects malformed cursors', async () => {

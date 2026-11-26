@@ -2,6 +2,7 @@ import { DynamicModule, Module } from '@nestjs/common';
 import { Pool } from 'pg';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { sql } from 'drizzle-orm';
+import { StartupFailure } from '../logging/startup-failure';
 import { findRuntimeRoleViolations, readRuntimeRoleState } from './role-self-check';
 
 export const DATABASE = Symbol('DATABASE');
@@ -26,10 +27,15 @@ export class DatabaseConnection {
   }
 
   async onModuleInit(): Promise<void> {
-    const state = await readRuntimeRoleState(this.pool);
+    const state = await readRuntimeRoleState(this.pool).catch((cause: unknown) => {
+      throw new StartupFailure('db.role-self-check.query', cause);
+    });
     const violations = findRuntimeRoleViolations(state, this.expectedRole);
     if (violations.length > 0) {
-      throw new Error(`Refusing to start with an unsafe database role: ${violations.join('; ')}.`);
+      throw new StartupFailure(
+        'db.role-self-check.validate',
+        new Error(`Refusing to start with an unsafe database role: ${violations.join('; ')}.`),
+      );
     }
   }
 

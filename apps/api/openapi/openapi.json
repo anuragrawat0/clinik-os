@@ -1030,7 +1030,7 @@
             "description": "Resource unavailable"
           },
           "422": {
-            "description": "Branch is inactive"
+            "description": "Branch is inactive or self-edit removes the last role"
           }
         },
         "security": [
@@ -1568,6 +1568,9 @@
           "organizationName": {
             "type": "string"
           },
+          "organizationSlug": {
+            "type": "string"
+          },
           "status": {
             "type": "string"
           },
@@ -1584,6 +1587,7 @@
         "required": [
           "organizationId",
           "organizationName",
+          "organizationSlug",
           "status",
           "organizationStatus",
           "roles"
@@ -2056,6 +2060,10 @@
             "items": {
               "$ref": "#/components/schemas/StaffAssignmentDto"
             }
+          },
+          "canEditRoles": {
+            "type": "boolean",
+            "description": "Whether the viewer can edit this member’s roles"
           }
         },
         "required": [
@@ -2063,7 +2071,8 @@
           "email",
           "fullName",
           "joinedAt",
-          "roles"
+          "roles",
+          "canEditRoles"
         ]
       },
       "InvitationListItemDto": {
@@ -2168,6 +2177,20 @@
               "webhook"
             ]
           },
+          "actorLabel": {
+            "type": "string",
+            "enum": [
+              "platform_admin",
+              "member",
+              "system",
+              "former_member"
+            ],
+            "nullable": true
+          },
+          "actorName": {
+            "type": "string",
+            "nullable": true
+          },
           "action": {
             "type": "string"
           },
@@ -2204,6 +2227,8 @@
           "occurredAt",
           "actorUserId",
           "actorType",
+          "actorLabel",
+          "actorName",
           "action",
           "resourceType",
           "resourceId",

@@ -244,7 +244,10 @@ export class OrganizationController {
   @ApiParam({ name: 'userId', type: String, format: 'uuid' })
   @ApiBody({ type: ReplaceRolesDto })
   @ApiNoContentResponse()
-  @ApiResponse({ status: 422, description: 'Branch is inactive' })
+  @ApiResponse({
+    status: 422,
+    description: 'Branch is inactive or self-edit removes the last role',
+  })
   replaceRoles(
     @CurrentTenant() tenant: TenantOperation,
     @Param('userId') userId: string,

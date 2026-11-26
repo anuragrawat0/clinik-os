@@ -240,6 +240,28 @@ export function isStaffRole(role: string): role is StaffRole {
   return staffRoles.some((staffRole) => staffRole === role);
 }
 
+const staffRoleRanks: Record<StaffRole, number> = {
+  org_owner: 4,
+  org_admin: 3,
+  branch_manager: 2,
+  doctor: 1,
+  receptionist: 1,
+};
+
+function highestStaffRank(assignments: readonly Pick<RoleScope, 'role'>[]): number {
+  return Math.max(
+    0,
+    ...assignments.map(({ role }) => (isStaffRole(role) ? staffRoleRanks[role] : 0)),
+  );
+}
+
+export function outranksStaffMember(
+  actor: readonly Pick<RoleScope, 'role'>[],
+  target: readonly Pick<RoleScope, 'role'>[],
+): boolean {
+  return highestStaffRank(actor) > highestStaffRank(target);
+}
+
 export function canGrant(
   actorRoles: readonly RoleScope[],
   role: StaffRole,

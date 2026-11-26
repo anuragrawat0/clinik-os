@@ -247,6 +247,8 @@ export class MemberDto {
   @ApiProperty({ type: String }) fullName!: string;
   @ApiProperty(date) joinedAt!: Date;
   @ApiProperty({ type: [StaffAssignmentDto] }) roles!: StaffAssignmentDto[];
+  @ApiProperty({ type: Boolean, description: 'Whether the viewer can edit this member’s roles' })
+  canEditRoles!: boolean;
 }
 
 export class OwnershipTransferDto {

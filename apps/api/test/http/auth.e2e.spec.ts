@@ -284,6 +284,7 @@ describe('auth HTTP', () => {
         {
           organizationId: organizationA,
           organizationName: 'Clinic A',
+          organizationSlug: 'clinic-a',
           status: 'active',
           organizationStatus: 'active',
           roles: [{ role: 'doctor', branchId: branch }],
@@ -1125,7 +1126,7 @@ describe('provisioning and tenant access', () => {
     });
     const { body: members } = await call('get', `${orgPath}/members`, manager.cookie).expect(200);
     expect(members.map(({ userId }: { userId: string }) => userId).sort()).toEqual(
-      [manager.id, doctor.id].sort(),
+      [admin.id, manager.id, doctor.id].sort(),
     );
     const { body: allMembers } = await call('get', `${orgPath}/members`, admin.cookie).expect(200);
     expect(allMembers.map(({ userId }: { userId: string }) => userId)).toContain(other.id);
@@ -1217,6 +1218,17 @@ describe('provisioning and tenant access', () => {
       [id],
     );
     expect(rows.rows).toEqual([{ role: 'org_owner' }]);
+    const audit = await call('get', `/orgs/${id}/audit-logs`, cookieFrom(results[1]))
+      .query({ action: 'organization.created' })
+      .expect(200);
+    expect(audit.body.items).toMatchObject([
+      {
+        action: 'organization.created',
+        actorUserId: admin.id,
+        actorLabel: 'platform_admin',
+        actorName: null,
+      },
+    ]);
     await assertAuditActions([
       ['organization.created', id],
       ['invitation.created', id],
