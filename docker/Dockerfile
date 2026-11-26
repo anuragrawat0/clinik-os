@@ -30,6 +30,7 @@ RUN pnpm --filter @clinik/shared build \
   && pnpm --filter @clinik/api --prod deploy --legacy /out/api
 
 FROM build AS web-build
+ENV NODE_OPTIONS=--max-old-space-size=2048
 
 ARG API_INTERNAL_ORIGIN=http://api:3001
 ENV API_INTERNAL_ORIGIN=${API_INTERNAL_ORIGIN}

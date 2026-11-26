@@ -458,6 +458,7 @@ export interface components {
             /** Format: uuid */
             organizationId: string;
             organizationName: string;
+            organizationSlug: string;
             status: string;
             organizationStatus: string;
             roles: components["schemas"]["RoleDto"][];
@@ -597,6 +598,8 @@ export interface components {
             /** Format: date-time */
             joinedAt: string;
             roles: components["schemas"]["StaffAssignmentDto"][];
+            /** @description Whether the viewer can edit this member’s roles */
+            canEditRoles: boolean;
         };
         InvitationListItemDto: {
             /** Format: uuid */
@@ -629,6 +632,9 @@ export interface components {
             actorUserId: string | null;
             /** @enum {string} */
             actorType: "user" | "system" | "webhook";
+            /** @enum {string|null} */
+            actorLabel: "platform_admin" | "member" | "system" | "former_member" | null;
+            actorName: string | null;
             action: string;
             resourceType: string;
             resourceId: string | null;
@@ -1542,7 +1548,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Branch is inactive */
+            /** @description Branch is inactive or self-edit removes the last role */
             422: {
                 headers: {
                     [name: string]: unknown;

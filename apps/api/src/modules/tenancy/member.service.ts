@@ -1,4 +1,10 @@
-import { canGrant, isStaffRole, type StaffRole } from '@clinik/shared';
+import {
+  canGrant,
+  isStaffRole,
+  outranksStaffMember,
+  rolePermissions,
+  type StaffRole,
+} from '@clinik/shared';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { coversBranch, forbidden } from '../../core/access/access';
@@ -15,19 +21,17 @@ import { PasswordService, SessionService, type RequestMeta } from '../identity/c
 import { OrganizationService, recordMutation } from './organization.service';
 import { roleKey, type MemberDto, type StaffAssignment } from './tenancy.dto';
 
-const roleRanks: Record<StaffRole, number> = {
-  org_owner: 4,
-  org_admin: 3,
-  branch_manager: 2,
-  doctor: 1,
-  receptionist: 1,
-};
-const highestRank = (roles: readonly StaffAssignment[]) =>
-  Math.max(0, ...roles.map(({ role }) => roleRanks[role]));
 const reauthFailureLimit = 5;
 
 function selfGrant(): never {
   throw new HttpException({ code: 'SELF_GRANT_FORBIDDEN' }, 403);
+}
+
+function canEditOtherRoles(actor: TenantOperation, target: readonly StaffAssignment[]): boolean {
+  return (
+    outranksStaffMember(actor.roles, target) &&
+    target.every(({ branchId }) => coversBranch(actor, 'member.manage', branchId))
+  );
 }
 
 @Injectable()
@@ -70,15 +74,31 @@ export class MemberService {
         ),
       )
       .orderBy(users.fullName, users.id, staffRoleAssignments.role, staffRoleAssignments.branchId);
-    const members = new Map<string, MemberDto>();
+    const members = new Map<
+      string,
+      Omit<MemberDto, 'roles' | 'canEditRoles'> & { roles: StaffAssignment[] }
+    >();
     const orgWide = coversBranch(actor, 'member.list', null);
     for (const { role, branchId, ...fields } of rows) {
-      if (!orgWide && (!role || !coversBranch(actor, 'member.list', branchId))) continue;
       const member = members.get(fields.userId) ?? { ...fields, roles: [] };
       if (role && isStaffRole(role)) member.roles.push({ role, branchId });
       members.set(member.userId, member);
     }
-    return [...members.values()];
+    const canManage = actor.roles.some(({ role }) => rolePermissions[role]['member.manage']);
+    return [...members.values()].flatMap((member) => {
+      const roles = orgWide
+        ? member.roles
+        : member.roles.filter(
+            ({ branchId }) => branchId === null || coversBranch(actor, 'member.list', branchId),
+          );
+      if (!orgWide && roles.length === 0) return [];
+      const canEditRoles =
+        Boolean(canManage) &&
+        (member.userId === actor.userId
+          ? member.roles.length > 1 && member.roles.some(({ role }) => role !== 'org_owner')
+          : canEditOtherRoles(actor, member.roles));
+      return [{ ...member, roles, canEditRoles }];
+    });
   }
 
   async replaceRoles(
@@ -87,14 +107,20 @@ export class MemberService {
     roles: StaffAssignment[],
     meta: RequestMeta,
   ): Promise<void> {
-    if (userId === actor.userId) selfGrant();
     const locked = await this.organization.lockForMember(actor, 'member.manage');
     const { orgId, tx } = locked;
     const oldRoles = await this.organization.activeMemberRoles(locked, userId);
+    const self = userId === locked.userId;
+    if (!self && !canEditOtherRoles(locked, oldRoles)) forbidden();
     const oldKeys = new Set(oldRoles.map(roleKey));
     const newKeys = new Set(roles.map(roleKey));
     const added = roles.filter((role) => !oldKeys.has(roleKey(role)));
     const removed = oldRoles.filter((role) => !newKeys.has(roleKey(role)));
+    if (self) {
+      if (added.length || !removed.length) selfGrant();
+      if (removed.some(({ role }) => role === 'org_owner')) forbidden();
+      if (!roles.length) throw new HttpException({ code: 'LAST_ROLE' }, 422);
+    }
     for (const { role, branchId } of added) {
       const branch =
         branchId === null ? null : await this.organization.getBranch(locked, branchId, true);
@@ -102,9 +128,13 @@ export class MemberService {
       if (branch && branch.status !== 'active')
         throw new HttpException({ code: 'BRANCH_INACTIVE' }, 422);
     }
-    for (const { role, branchId } of removed) {
-      if (role === 'org_owner' || !canGrant(locked.roles, role, branchId)) forbidden();
-    }
+    if (
+      !self &&
+      removed.some(
+        ({ role, branchId }) => role === 'org_owner' || !canGrant(locked.roles, role, branchId),
+      )
+    )
+      forbidden();
     if (removed.length)
       await tx.delete(staffRoleAssignments).where(
         and(
@@ -125,12 +155,20 @@ export class MemberService {
           createdBy: actor.userId,
         })),
       );
-    await recordMutation(this.audit, actor, meta, {
-      action: 'member.roles_replaced',
-      resourceType: 'organization_member',
-      resourceId: userId,
-      changedFields: added.length || removed.length ? ['roles'] : [],
-    });
+    await this.audit.record(
+      {
+        ...meta,
+        organizationId: orgId,
+        actorUserId: locked.userId,
+        action: 'member.roles_replaced',
+        outcome: 'success',
+        resourceType: 'organization_member',
+        resourceId: userId,
+        changedFields: added.length || removed.length ? ['roles'] : [],
+        metadata: self ? { self: true } : undefined,
+      },
+      tx,
+    );
   }
 
   async remove(actor: TenantOperation, userId: string, meta: RequestMeta): Promise<void> {
@@ -138,7 +176,7 @@ export class MemberService {
     const locked = await this.organization.lockForMember(actor, 'member.manage');
     const { orgId, tx } = locked;
     const target = await this.organization.activeMemberRoles(locked, userId);
-    if (highestRank(locked.roles) <= highestRank(target)) forbidden();
+    if (!outranksStaffMember(locked.roles, target)) forbidden();
     if (
       !coversBranch(locked, 'member.manage', null) &&
       (!target.length ||

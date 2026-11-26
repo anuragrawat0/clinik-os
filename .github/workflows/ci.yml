@@ -143,6 +143,27 @@ jobs:
           echo "API failed to recover after migrations." >&2
           exit 1
 
+      - name: Set up Node for WF-1
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run WF-1 clinic administration smoke test
+        run: |
+          corepack enable
+          pnpm install --filter clinik-os --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+          pnpm exec playwright test apps/web/test/auth-form-security.spec.ts --workers=1
+          node scripts/wf1-compose-smoke.mjs
+
+      - name: Upload WF-1 failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wf1-failure
+          path: wf1-artifacts/
+          if-no-files-found: ignore
+
       - name: Debug Docker containers on failure
         if: failure()
         run: |

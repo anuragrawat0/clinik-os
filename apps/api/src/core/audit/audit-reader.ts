@@ -2,7 +2,7 @@ import { ApiProperty } from '@nestjs/swagger';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { notFound } from '../access/access';
-import { auditLogs, organizationMembers } from '../db/schema/m1a';
+import { auditLogs, organizationMembers, users } from '../db/schema/m1a';
 import { cursorPage, cursorTimestamp, pageLimit, readCursor } from '../pagination/cursor';
 import type { TenantOperation } from '../tenancy-context/request-transaction';
 
@@ -30,12 +30,16 @@ export const auditListQuery = z.strictObject({
 });
 
 const nullableUuid = { type: String, format: 'uuid', nullable: true };
+const auditActorLabels = ['platform_admin', 'member', 'system', 'former_member'] as const;
+type AuditActorLabel = (typeof auditActorLabels)[number];
 
 class AuditLogDto {
   @ApiProperty({ type: String, description: 'Audit ID as a decimal string' }) id!: string;
   @ApiProperty({ type: String, format: 'date-time' }) occurredAt!: string;
   @ApiProperty(nullableUuid) actorUserId!: string | null;
   @ApiProperty({ enum: ['user', 'system', 'webhook'] }) actorType!: string;
+  @ApiProperty({ enum: [...auditActorLabels], nullable: true }) actorLabel!: AuditActorLabel | null;
+  @ApiProperty({ type: String, nullable: true }) actorName!: string | null;
   @ApiProperty({ type: String }) action!: string;
   @ApiProperty({ type: String }) resourceType!: string;
   @ApiProperty({ type: String, nullable: true }) resourceId!: string | null;
@@ -89,6 +93,18 @@ export async function listAuditLogs(
       cursorAt: cursorTimestamp(auditLogs.occurredAt),
       actorUserId: auditLogs.actorUserId,
       actorType: auditLogs.actorType,
+      actorLabel: sql<AuditActorLabel | null>`CASE
+        WHEN ${auditLogs.actorType} = 'system' THEN 'system'
+        WHEN ${auditLogs.actorType} = 'user' THEN CASE
+          WHEN ${users.isPlatformAdmin} THEN 'platform_admin'
+          WHEN ${organizationMembers.status} = 'active' THEN 'member'
+          WHEN ${organizationMembers.status} = 'suspended' THEN 'former_member'
+        END
+      END`,
+      actorName: sql<string | null>`CASE
+        WHEN ${organizationMembers.userId} IS NOT NULL AND NOT ${users.isPlatformAdmin}
+          THEN ${users.fullName}
+      END`,
       action: auditLogs.action,
       resourceType: auditLogs.resourceType,
       resourceId: auditLogs.resourceId,
@@ -97,6 +113,14 @@ export async function listAuditLogs(
       branchId: auditLogs.branchId,
     })
     .from(auditLogs)
+    .leftJoin(
+      organizationMembers,
+      and(
+        eq(organizationMembers.organizationId, auditLogs.organizationId),
+        eq(organizationMembers.userId, auditLogs.actorUserId),
+      ),
+    )
+    .leftJoin(users, and(eq(users.id, auditLogs.actorUserId), eq(auditLogs.actorType, 'user')))
     .where(
       and(
         inOrg,

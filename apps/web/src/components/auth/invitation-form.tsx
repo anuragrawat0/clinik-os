@@ -2,62 +2,58 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type FormEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import { apiClient } from '@/lib/api-client/client';
+import { checkResponse, displayError, responseData } from '@/lib/api-client/problems';
+import { useHydrated } from './use-hydrated';
 
 export function InvitationForm({ token }: { token: string }) {
   const router = useRouter();
+  const cache = useQueryClient();
+  const hydrated = useHydrated();
   const [mode, setMode] = useState<'new' | 'existing'>('new');
-  const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
   const params = { path: { token } };
   const preview = useQuery({
     queryKey: ['invitation', token],
     gcTime: 0,
     retry: false,
-    queryFn: async ({ signal }) => {
-      const { data } = await apiClient.GET('/api/v1/auth/invitations/{token}', { params, signal });
-      if (!data) throw new Error('Invitation unavailable');
-      return data;
-    },
+    queryFn: async ({ signal }) =>
+      responseData(await apiClient.GET('/api/v1/auth/invitations/{token}', { params, signal })),
   });
 
-  async function accept(values?: FormData) {
-    setBusy(true);
-    setFailed(false);
-    try {
+  const accept = useMutation({
+    gcTime: 0,
+    mutationFn: async (values: FormData | undefined) => {
       const password = String(values?.get('password') ?? '');
       if (values && mode === 'existing' && preview.data) {
         const login = await apiClient.POST('/api/v1/auth/login', {
           body: { email: preview.data.email, password },
         });
-        if (!login.response.ok) {
-          setFailed(true);
-          return;
-        }
+        checkResponse(login.response, login.error);
       }
       const body =
         values && mode === 'new'
           ? { fullName: String(values.get('fullName') ?? ''), password }
           : {};
-      const { response } = await apiClient.POST('/api/v1/auth/invitations/{token}/accept', {
+      const { response, error } = await apiClient.POST('/api/v1/auth/invitations/{token}/accept', {
         params,
         body,
       });
-      if (response.ok) router.replace('/app');
-      else setFailed(true);
-    } catch {
-      setFailed(true);
-    } finally {
-      setBusy(false);
-    }
-  }
+      checkResponse(response, error);
+    },
+    onSuccess: () => {
+      cache.clear();
+      router.replace('/app');
+    },
+  });
+  const busy = accept.isPending;
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void accept(new FormData(event.currentTarget));
+    if (!hydrated || busy) return;
+    accept.mutate(new FormData(event.currentTarget));
   }
 
   return (
@@ -91,7 +87,7 @@ export function InvitationForm({ token }: { token: string }) {
               <dd>{preview.data.email}</dd>
             </div>
           </dl>
-          <form key={mode} className="auth-form" onSubmit={submit} aria-busy={busy}>
+          <form key={mode} className="auth-form" method="post" onSubmit={submit} aria-busy={busy}>
             {mode === 'new' ? (
               <label className="auth-field">
                 Full name
@@ -119,12 +115,12 @@ export function InvitationForm({ token }: { token: string }) {
               />
             </label>
             {mode === 'new' && <p>Use a unique password with 12 to 128 characters.</p>}
-            {failed && (
+            {accept.isError && (
               <p role="alert" className="auth-error">
-                Unable to accept this invitation. Check your details and try again.
+                {displayError(accept.error)}
               </p>
             )}
-            <Button type="submit" disabled={busy}>
+            <Button type="submit" disabled={!hydrated || busy}>
               {mode === 'new' ? 'Create account and accept' : 'Sign in and accept'}
             </Button>
           </form>
@@ -135,13 +131,18 @@ export function InvitationForm({ token }: { token: string }) {
               disabled={busy}
               onClick={() => {
                 setMode(mode === 'new' ? 'existing' : 'new');
-                setFailed(false);
+                accept.reset();
               }}
             >
               {mode === 'new' ? 'I already have an account' : 'I need to create an account'}
             </Button>
             {mode === 'existing' && (
-              <Button type="button" tone="quiet" disabled={busy} onClick={() => void accept()}>
+              <Button
+                type="button"
+                tone="quiet"
+                disabled={busy}
+                onClick={() => accept.mutate(undefined)}
+              >
                 Accept with my current session
               </Button>
             )}
