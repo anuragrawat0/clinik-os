@@ -1,7 +1,17 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
 
-const commonConfigSchema = z.object({
+const timeoutMs = z.coerce.number().int().min(1).max(2_147_483_647);
+const databaseTimeoutsSchema = z.object({
+  DB_POOL_ACQUIRE_TIMEOUT_MS: timeoutMs.default(5_000),
+  DB_STATEMENT_TIMEOUT_MS: timeoutMs.default(10_000),
+  DB_IDLE_IN_TX_TIMEOUT_MS: timeoutMs.default(15_000),
+});
+const swaggerEnabled = z
+  .stringbool({ truthy: ['true', '1'], falsy: ['false', '0'], case: 'insensitive' })
+  .default(false);
+
+const commonConfigSchema = databaseTimeoutsSchema.extend({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });
@@ -29,6 +39,7 @@ const trustedProxyCidrs = z
   });
 
 const apiConfigSchema = commonConfigSchema.extend({
+  ENABLE_SWAGGER: swaggerEnabled,
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
   DATABASE_URL: z.string().url(),
   TRUSTED_PROXY_CIDRS: trustedProxyCidrs,
@@ -57,4 +68,12 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
 
 export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   return workerConfigSchema.parse(env);
+}
+
+export function loadDatabaseTimeouts(env: NodeJS.ProcessEnv = process.env) {
+  return databaseTimeoutsSchema.parse(env);
+}
+
+export function loadSwaggerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return swaggerEnabled.parse(env.ENABLE_SWAGGER);
 }

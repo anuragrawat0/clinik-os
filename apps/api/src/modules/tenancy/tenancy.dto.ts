@@ -1,19 +1,13 @@
-import { staffRoles } from '@clinik/shared';
+import { displayName, normalizeTimeZone, staffRoles } from '@clinik/shared';
 import { HttpException } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { z } from 'zod';
 import { notFound } from '../../core/access/access';
 import { pageLimit } from '../../core/pagination/cursor';
 
-const name = z
-  .string()
-  .trim()
-  .min(1)
-  .max(200)
-  .refine((value) => !value.includes('\0'));
+const name = displayName.refine((value) => value.length <= 200);
 const email = z.email().max(254);
 const timezone = z.string().max(100);
-const validTimezones = new Set(['UTC', ...Intl.supportedValuesOf('timeZone')]);
 const uuid = z.guid().transform((id) => id.toLowerCase());
 const slugPattern = '^[a-z0-9][a-z0-9-]{2,62}$';
 const branchCodePattern = '^[A-Z0-9-]{2,16}$';
@@ -24,10 +18,12 @@ export function resourceId(value: string): string {
   return result.success ? result.data : notFound();
 }
 
-export function validateTimezone(value: string | undefined): void {
-  if (value !== undefined && !validTimezones.has(value)) {
+export function validateTimezone(value: string): string {
+  const canonical = normalizeTimeZone(value);
+  if (canonical === undefined) {
     throw new HttpException({ code: 'INVALID_TIMEZONE' }, 422);
   }
+  return canonical;
 }
 
 export const ownerInviteInput = z.strictObject({
@@ -182,7 +178,6 @@ export class InvitationListItemDto {
   @ApiProperty({ enum: staffRoles }) role!: string;
   @ApiProperty({ ...id, nullable: true }) branchId!: string | null;
   @ApiProperty(date) expiresAt!: Date;
-  @ApiProperty(id) invitedBy!: string;
   @ApiProperty(date) createdAt!: Date;
   @ApiProperty({ enum: invitationStatuses }) status!: (typeof invitationStatuses)[number];
 }

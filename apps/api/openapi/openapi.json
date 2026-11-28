@@ -1126,6 +1126,12 @@
           },
           "422": {
             "description": "Current password is incorrect"
+          },
+          "429": {
+            "description": "Reauthentication is already in progress for this session"
+          },
+          "503": {
+            "description": "Database connection or denial processing unavailable"
           }
         },
         "security": [
@@ -2110,10 +2116,6 @@
             "type": "string",
             "format": "date-time"
           },
-          "invitedBy": {
-            "type": "string",
-            "format": "uuid"
-          },
           "createdAt": {
             "type": "string",
             "format": "date-time"
@@ -2134,7 +2136,6 @@
           "role",
           "branchId",
           "expiresAt",
-          "invitedBy",
           "createdAt",
           "status"
         ]

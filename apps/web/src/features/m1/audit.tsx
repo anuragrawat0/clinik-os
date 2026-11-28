@@ -13,7 +13,16 @@ import { Heading, LoadError, LoadMore, Notice, Unavailable, textField } from './
 
 type Filters = { actorId?: string; action?: string; from?: string; to?: string };
 const asInstant = (value: string) => (value ? new Date(value).toISOString() : undefined);
-const eventTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+export const auditTimestampOptions: Intl.DateTimeFormatOptions = {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+  timeZoneName: 'short',
+};
+const eventTime = new Intl.DateTimeFormat(undefined, auditTimestampOptions);
 
 function actorDisplay({ actorType, actorLabel, actorName }: components['schemas']['AuditLogDto']) {
   if (actorType === 'system') return 'System';

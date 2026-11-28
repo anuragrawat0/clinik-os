@@ -110,6 +110,15 @@ async function createInvitation(
 ) {
   const token = tokens.generate();
   exposedSecrets.add(token.raw);
+  const { id: invitedBy } = await createUser();
+  await harness.adminPool.query(
+    'INSERT INTO organization_members (organization_id, user_id) VALUES ($1, $2)',
+    [organizationA, invitedBy],
+  );
+  await harness.adminPool.query(
+    "INSERT INTO staff_role_assignments (organization_id, user_id, role) VALUES ($1, $2, 'org_admin')",
+    [organizationA, invitedBy],
+  );
   const result = await harness.adminPool.query<{ id: string }>(
     `INSERT INTO invitations (organization_id, email, role, branch_id, token_hash, invited_by,
                               expires_at, accepted_at, revoked_at)
@@ -119,7 +128,7 @@ async function createInvitation(
       email,
       branch,
       token.hash,
-      (await createUser()).id,
+      invitedBy,
       options.expiresAt ?? new Date(clock.now().getTime() + HOUR),
       options.acceptedAt ?? null,
       options.revokedAt ?? null,
@@ -127,6 +136,7 @@ async function createInvitation(
   );
   return {
     id: result.rows[0].id,
+    invitedBy,
     path: `/invitations/${organizationA}.${token.raw}`,
     raw: token.raw,
   };
@@ -635,11 +645,27 @@ describe('staff invitation HTTP', () => {
       await appClient.query('BEGIN');
       await appClient.query("SELECT set_config('app.current_org_id', $1, true)", [organizationA]);
       expect(
-        (await appClient.query('SELECT user_id, status FROM organization_members')).rows,
-      ).toEqual([{ user_id: me.body.user.id, status: 'active' }]);
+        (
+          await appClient.query(
+            'SELECT user_id, status FROM organization_members ORDER BY user_id = $1',
+            [invitation.invitedBy],
+          )
+        ).rows,
+      ).toEqual([
+        { user_id: me.body.user.id, status: 'active' },
+        { user_id: invitation.invitedBy, status: 'active' },
+      ]);
       expect(
-        (await appClient.query('SELECT user_id, role, branch_id FROM staff_role_assignments')).rows,
-      ).toEqual([{ user_id: me.body.user.id, role: 'doctor', branch_id: branch }]);
+        (
+          await appClient.query(
+            'SELECT user_id, role, branch_id FROM staff_role_assignments ORDER BY user_id = $1',
+            [invitation.invitedBy],
+          )
+        ).rows,
+      ).toEqual([
+        { user_id: me.body.user.id, role: 'doctor', branch_id: branch },
+        { user_id: invitation.invitedBy, role: 'org_admin', branch_id: null },
+      ]);
       await appClient.query("SELECT set_config('app.current_org_id', $1, true)", [organizationB]);
       expect((await appClient.query('SELECT * FROM organization_members')).rows).toEqual([]);
       expect((await appClient.query('SELECT * FROM staff_role_assignments')).rows).toEqual([]);
@@ -672,7 +698,7 @@ describe('staff invitation HTTP', () => {
        FROM invitations WHERE id = $1`,
       [invitation.id, email, organizationA],
     );
-    expect(rows).toEqual([{ accepted_at: null, revoked_at: null, users: 0, members: 0, roles: 0 }]);
+    expect(rows).toEqual([{ accepted_at: null, revoked_at: null, users: 0, members: 1, roles: 1 }]);
     await get(invitation.path).expect(200);
     const accepted = await accept(password).expect(204);
     const profile = await get('/me').set('Cookie', cookieFrom(accepted)).expect(200);
@@ -1316,7 +1342,14 @@ describe('provisioning and tenant access', () => {
     await transfer(owner.id).expect(403);
     assertProblem(await transfer(first.id, 'incorrect').expect(422), 'INVALID_PASSWORD');
     const attempts = await Promise.all([transfer(first.id), transfer(second.id)]);
-    expect(attempts.map(({ status }) => status).sort()).toEqual([204, 403]);
+    const statuses = attempts.map(({ status }) => status).sort();
+    expect([
+      [204, 403],
+      [204, 429],
+    ]).toContainEqual(statuses);
+    for (const attempt of attempts) {
+      if (attempt.status === 429) assertProblem(attempt, 'REAUTH_IN_PROGRESS');
+    }
     const winner = attempts[0].status === 204 ? first : second;
     const { rows } = await harness.adminPool.query(
       `SELECT user_id, role FROM staff_role_assignments WHERE organization_id = $1 AND
@@ -1340,6 +1373,66 @@ describe('provisioning and tenant access', () => {
       ['organization.ownership_transferred', organizationA],
     ]);
   });
+
+  it('returns 403 to the losing ownership transfer from a different session of the same owner', async () => {
+    const owner = await accessUser({ orgId: organizationA, roles: [ownerRole] });
+    const candidates = await Promise.all([
+      accessUser({ orgId: organizationA, roles: [adminRole] }),
+      accessUser({ orgId: organizationA, roles: [adminRole] }),
+    ]);
+    const firstCookie = await signIn(owner.email);
+    const secondCookie = await signIn(owner.email);
+    expect(firstCookie).not.toBe(secondCookie);
+
+    let bothVerifying!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      bothVerifying = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const passwords = app.get(PasswordService);
+    const verifyPassword = passwords.verify.bind(passwords);
+    let arrivals = 0;
+    const verify = vi.spyOn(passwords, 'verify').mockImplementation(async (hash, plain) => {
+      arrivals += 1;
+      if (arrivals === 2) bothVerifying();
+      await held;
+      return verifyPassword(hash, plain);
+    });
+    const attempts = [firstCookie, secondCookie].map((cookie, index) =>
+      call('post', `${orgPath}/ownership-transfer`, cookie)
+        .send({ newOwnerUserId: candidates[index].id, currentPassword: password })
+        .timeout({ response: 10_000 })
+        .then((response) => response),
+    );
+    try {
+      await Promise.race([
+        entered,
+        Promise.race(attempts).then(({ status }) => {
+          throw new Error(`A transfer finished before both sessions entered re-auth: ${status}`);
+        }),
+      ]);
+    } finally {
+      release();
+      verify.mockRestore();
+      await Promise.allSettled(attempts);
+    }
+
+    const responses = await Promise.all(attempts);
+    expect(responses.map(({ status }) => status).sort()).toEqual([204, 403]);
+    assertProblem(
+      responses.find(({ status }) => status === 403)!,
+      'FORBIDDEN',
+    );
+    const winner = candidates[responses.findIndex(({ status }) => status === 204)];
+    const { rows } = await harness.adminPool.query(
+      "SELECT user_id FROM staff_role_assignments WHERE organization_id = $1 AND role = 'org_owner'",
+      [organizationA],
+    );
+    expect(rows).toEqual([{ user_id: winner.id }]);
+  }, 30_000);
 
   it('suspends a removed member, revokes all sessions and reactivates only the new role', async () => {
     const owner = await accessUser({ orgId: organizationA, roles: [ownerRole] });

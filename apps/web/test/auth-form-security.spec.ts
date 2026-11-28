@@ -267,9 +267,7 @@ for (const existing of [false, true]) {
   });
 }
 
-test('ownership transfer by Enter submits the current password only in the POST body', async ({
-  page,
-}) => {
+async function mockOwnerSettings(page: Page) {
   await page.route('**/api/v1/auth/me', (route) =>
     route.fulfill({
       json: {
@@ -294,6 +292,12 @@ test('ownership transfer by Enter submits the current password only in the POST 
       json: [{ userId: candidateId, fullName: 'New Owner', email: 'new-owner@clinik.test' }],
     }),
   );
+}
+
+test('ownership transfer by Enter submits the current password only in the POST body', async ({
+  page,
+}) => {
+  await mockOwnerSettings(page);
   const endpoint = `${clinicApi}/ownership-transfer`;
   await page.route(`**${endpoint}`, (route) => route.fulfill({ status: 204 }));
   await page.goto(`${web}${settingsPath}?email=${email}&password=${password}`);
@@ -310,4 +314,33 @@ test('ownership transfer by Enter submits the current password only in the POST 
     body: { newOwnerUserId: candidateId, currentPassword: password },
   });
   await expect(page.getByRole('status')).toHaveText('Ownership transferred.');
+});
+
+test('double-clicking Confirm transfer sends exactly one ownership transfer request', async ({
+  page,
+}) => {
+  await mockOwnerSettings(page);
+  const endpoint = `${clinicApi}/ownership-transfer`;
+  let requests = 0;
+  let release!: () => void;
+  const heldResponse = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**${endpoint}`, async (route) => {
+    requests++;
+    await heldResponse;
+    await route.fulfill({ status: 204 });
+  });
+  await page.goto(web + settingsPath);
+  await page.getByRole('button', { name: 'Transfer ownership' }).click();
+  await page.getByLabel('New owner').selectOption(candidateId);
+  await page.getByLabel('Current password', { exact: true }).fill(password);
+  try {
+    await page.getByRole('button', { name: 'Confirm transfer' }).dblclick();
+    await expect.poll(() => requests).toBe(1);
+  } finally {
+    release();
+  }
+  await expect(page.getByRole('status')).toHaveText('Ownership transferred.');
+  expect(requests).toBe(1);
 });

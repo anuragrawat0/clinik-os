@@ -11,6 +11,8 @@ import type { Response } from 'express';
 import { defer, lastValueFrom, type Observable } from 'rxjs';
 import type { AuthenticatedRequest } from '../auth/auth-context';
 import type { TenantTransaction } from '../db/transaction-context';
+import { logger } from '../logging/logger';
+import { errorClass } from '../logging/startup-failure';
 
 export interface RequestTenant {
   orgId: string;
@@ -27,6 +29,7 @@ export interface TenantOperation extends RequestTenant {
   tx: TenantTransaction;
   userId: string;
   afterCommit(callback: () => Promise<void>): void;
+  afterRollback(callback: () => Promise<void>): void;
 }
 
 function deferred<T>() {
@@ -39,18 +42,35 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function runHooks(callbacks: (() => Promise<void>)[]): Promise<void> {
+  let firstFailure: { error: unknown } | undefined;
+  for (const callback of callbacks) {
+    try {
+      await callback();
+    } catch (error) {
+      if (firstFailure) {
+        logger.error({ errorClass: errorClass(error) }, 'Tenant transaction hook failed');
+      } else {
+        firstFailure = { error };
+      }
+    }
+  }
+  if (firstFailure) throw firstFailure.error;
+}
+
 // Nest runs guards outside interceptors. The transaction starts during tenant resolution
 // and stays open until the interceptor hands it the handler's result or error.
 export class TenantWork {
   private readonly handler = deferred<() => Promise<unknown>>();
-  private readonly callbacks: (() => Promise<void>)[] = [];
+  private readonly commitCallbacks: (() => Promise<void>)[] = [];
+  private readonly rollbackCallbacks: (() => Promise<void>)[] = [];
   private readonly completion: Promise<unknown>;
   readonly operation: Promise<TenantOperation>;
 
   constructor(
     res: Response,
     run: (
-      publish: (op: Omit<TenantOperation, 'afterCommit'>) => Promise<unknown>,
+      publish: (op: Omit<TenantOperation, 'afterCommit' | 'afterRollback'>) => Promise<unknown>,
     ) => Promise<unknown>,
   ) {
     const operation = deferred<TenantOperation>();
@@ -61,7 +81,11 @@ export class TenantWork {
       });
     res.once('close', abort);
     this.completion = run(async (op) => {
-      operation.resolve({ ...op, afterCommit: (callback) => this.callbacks.push(callback) });
+      operation.resolve({
+        ...op,
+        afterCommit: (callback) => this.commitCallbacks.push(callback),
+        afterRollback: (callback) => this.rollbackCallbacks.push(callback),
+      });
       if (res.destroyed) abort();
       const handle = await this.handler.promise;
       return handle();
@@ -77,8 +101,14 @@ export class TenantWork {
 
   async finish(handle: () => Promise<unknown>): Promise<unknown> {
     this.handler.resolve(handle);
-    const result = await this.completion;
-    for (const callback of this.callbacks) await callback();
+    let result: unknown;
+    try {
+      result = await this.completion;
+    } catch (error) {
+      await runHooks(this.rollbackCallbacks);
+      throw error;
+    }
+    await runHooks(this.commitCallbacks);
     return result;
   }
 }

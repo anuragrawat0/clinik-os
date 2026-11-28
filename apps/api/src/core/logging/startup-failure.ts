@@ -32,13 +32,29 @@ const systemCodes = new Set([
   'ETIMEDOUT',
 ]);
 
-function errorClass(error: unknown): string {
+export function errorClass(error: unknown): string {
   if (error instanceof DatabaseError) return 'DatabaseError';
   if (error instanceof ZodError) return 'ZodError';
   if (error instanceof TypeError) return 'TypeError';
   if (error instanceof SyntaxError) return 'SyntaxError';
   if (error instanceof Error) return 'Error';
   return 'UnknownError';
+}
+
+export function errorCode(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string')
+    return undefined;
+  if (error instanceof DatabaseError)
+    return /^[A-Z0-9]{5}$/.test(error.code) ? error.code : undefined;
+  return /^[A-Z][A-Z0-9_]{1,31}$/.test(error.code) ? error.code : undefined;
+}
+
+export function errorConstraint(error: unknown): string | undefined {
+  return error instanceof DatabaseError &&
+    typeof error.constraint === 'string' &&
+    /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(error.constraint)
+    ? error.constraint
+    : undefined;
 }
 
 export function logApiStartupFailure(

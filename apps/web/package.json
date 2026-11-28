@@ -12,6 +12,7 @@
     "start": "node dist-server/server.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "vitest run --config vitest.config.mts",
     "api:client": "openapi-typescript ../api/openapi/openapi.json -o src/lib/api-client/schema.d.ts"
   },
   "dependencies": {

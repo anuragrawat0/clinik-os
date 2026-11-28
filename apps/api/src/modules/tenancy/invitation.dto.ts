@@ -1,13 +1,8 @@
+import { displayName } from '@clinik/shared';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { z } from 'zod';
 
-const fullName = z
-  .string()
-  .trim()
-  .refine((name) => {
-    const length = [...name].length;
-    return length >= 1 && length <= 200 && !name.includes('\0');
-  });
+const fullName = displayName.refine((name) => [...name].length <= 200);
 const password = z.string().max(1024);
 export const acceptInvitationInput = z.strictObject({
   fullName: fullName.optional(),

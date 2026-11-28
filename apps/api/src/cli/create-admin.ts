@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import type { Readable } from 'node:stream';
 import { parseArgs } from 'node:util';
+import { displayName } from '@clinik/shared';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { AuditWriter } from '../core/audit/audit-writer';
@@ -10,12 +11,7 @@ import { PasswordService } from '../modules/identity/core';
 
 const identityInput = z.object({
   email: z.email().max(254),
-  name: z
-    .string()
-    .trim()
-    .min(1)
-    .max(200)
-    .refine((value) => !value.includes('\0')),
+  name: displayName.refine((name) => name.length <= 200),
 });
 
 type PasswordInput = Readable & {

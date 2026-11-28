@@ -1,10 +1,14 @@
 'use client';
 
+import { isValidTimeZone, timeZoneOptions } from '@clinik/shared';
 import { useMutation } from '@tanstack/react-query';
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { useHydrated } from '@/components/auth/use-hydrated';
 import { Button } from '@/components/ui/button';
 import { displayError } from '@/lib/api-client/problems';
+import { useSingleFlightSubmit } from '@/lib/use-single-flight-submit';
+
+export { useSingleFlightSubmit };
 
 export function Notice({ children, alert = false }: { children: ReactNode; alert?: boolean }) {
   return (
@@ -40,14 +44,25 @@ export function textField(data: FormData, name: string): string {
   return String(data.get(name) ?? '').trim();
 }
 
-const timezones = ['UTC', ...Intl.supportedValuesOf('timeZone')];
+const timezones = timeZoneOptions();
 
 export function Timezone({ initial = 'UTC' }: { initial?: string }) {
+  const validInitial = isValidTimeZone(initial);
   return (
     <label className="m1-field">
       Time zone
-      <select aria-label="Time zone" name="timezone" defaultValue={initial} required>
-        {!timezones.includes(initial) && <option>{initial}</option>}
+      <select
+        aria-label="Time zone"
+        name="timezone"
+        defaultValue={validInitial ? initial : ''}
+        required
+      >
+        {!validInitial && (
+          <option value="" disabled>
+            Select a supported time zone
+          </option>
+        )}
+        {validInitial && !timezones.includes(initial) && <option>{initial}</option>}
         {timezones.map((zone) => (
           <option key={zone}>{zone}</option>
         ))}
@@ -75,6 +90,7 @@ export function FormDialog({
   const titleId = useId();
   const hydrated = useHydrated();
   const mutation = useMutation({ mutationFn: action, onSuccess: onClose });
+  const runSubmit = useSingleFlightSubmit();
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
@@ -99,7 +115,7 @@ export function FormDialog({
         onSubmit={(event) => {
           event.preventDefault();
           if (!hydrated || submitDisabled || mutation.isPending) return;
-          mutation.mutate(new FormData(event.currentTarget));
+          void runSubmit(() => mutation.mutateAsync(new FormData(event.currentTarget)));
         }}
       >
         <fieldset disabled={mutation.isPending}>{children}</fieldset>

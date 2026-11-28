@@ -189,8 +189,7 @@ describe('AUDIT B6: ownership-transfer denial path and the connection pool', () 
         .post(`${orgPath}/ownership-transfer`)
         .set(headers)
         .set('Cookie', owner.cookie)
-        .send({ newOwnerUserId: target.id, currentPassword: 'definitely-not-the-password' })
-        .then((response) => response.status),
+        .send({ newOwnerUserId: target.id, currentPassword: 'definitely-not-the-password' }),
     );
     const outcome = await withTimeout(Promise.all(attempts), 20_000);
     const health =
@@ -216,6 +215,14 @@ describe('AUDIT B6: ownership-transfer denial path and the connection pool', () 
     }
     expect(outcome).not.toBe('TIMEOUT');
     expect(health).toBe(200);
-    for (const status of outcome as number[]) expect([401, 422]).toContain(status);
+    if (outcome === 'TIMEOUT') throw new Error('Expected transfer responses');
+    expect(outcome.some(({ status }) => status === 422)).toBe(true);
+    for (const response of outcome) {
+      expect([401, 422, 429]).toContain(response.status);
+      if (response.status === 429) {
+        expect(response.headers['content-type']).toContain('application/problem+json');
+        expect(response.body.code).toBe('REAUTH_IN_PROGRESS');
+      }
+    }
   }, 60_000);
 });

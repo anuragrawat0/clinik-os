@@ -1,4 +1,4 @@
-import { canGrant } from '@clinik/shared';
+import { canGrant, isStaffRole } from '@clinik/shared';
 import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { DrizzleQueryError, and, desc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -97,7 +97,6 @@ export class InvitationService {
         role: invitations.role,
         branchId: invitations.branchId,
         expiresAt: invitations.expiresAt,
-        invitedBy: invitations.invitedBy,
         cursorAt: cursorTimestamp(invitations.createdAt),
         acceptedAt: invitations.acceptedAt,
         revokedAt: invitations.revokedAt,
@@ -386,6 +385,26 @@ export class InvitationService {
     return user;
   }
 
+  private async verifyInviter(tx: TenantTransaction, invitation: typeof invitations.$inferSelect) {
+    const { organizationId: orgId, invitedBy, role, branchId } = invitation;
+    if (!isStaffRole(role)) unavailable();
+    const [inviter] = await tx
+      .select({ isPlatformAdmin: users.isPlatformAdmin })
+      .from(users)
+      .where(and(eq(users.id, invitedBy), eq(users.status, 'active')));
+    if (!inviter) unavailable();
+
+    if (role === 'org_owner') {
+      if (!inviter.isPlatformAdmin) unavailable();
+      return;
+    }
+    const roles = await this.organization.activeMemberRoles(
+      { tx, orgId, userId: invitedBy },
+      invitedBy,
+    );
+    if (!canGrant(roles, role, branchId)) unavailable();
+  }
+
   async accept(
     token: string,
     body: unknown,
@@ -399,6 +418,7 @@ export class InvitationService {
       const org = await lockOrganization(tx, orgId);
       if (org.status !== 'active') unavailable();
       const { invitation } = await this.findInvitation(tx, orgId, rawToken, true);
+      await this.verifyInviter(tx, invitation);
       if (invitation.branchId !== null) {
         const branch = await this.organization.getBranch({ tx, orgId }, invitation.branchId, true);
         if (branch.status !== 'active') unavailable();

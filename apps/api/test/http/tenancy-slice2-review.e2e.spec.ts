@@ -10,6 +10,8 @@ import { Pool, type PoolClient } from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuditWriter } from '../../src/core/audit';
+import { DATABASE, type DatabaseConnection } from '../../src/core/db/database.module';
+import { logger } from '../../src/core/logging/logger';
 import { PasswordService, SessionService, TokenService } from '../../src/modules/identity/core';
 import { AUTH_MAIL_TRANSPORT } from '../../src/modules/notifications/auth-mailer';
 import {
@@ -194,6 +196,14 @@ async function auditRowsForOrg() {
      WHERE organization_id IS NOT NULL ORDER BY id`,
   );
   return rows;
+}
+
+function deferredSignal() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 beforeAll(async () => {
@@ -796,16 +806,36 @@ describe('P5(b) ownership transfer with a wrong current password', () => {
         newOwnerUserId: target.id,
         currentPassword: 'incorrect',
       });
+    const record = AuditWriter.prototype.record;
     const audit = vi.spyOn(AuditWriter.prototype, 'record');
-    const revoke = vi.spyOn(app.get(SessionService), 'revoke');
+    const sessions = app.get(SessionService);
+    const revoke = vi.spyOn(sessions, 'revoke');
+    const log = vi.spyOn(logger, 'error');
     try {
-      audit.mockRejectedValueOnce(new Error('Synthetic audit write failure'));
-      await transfer().expect(500);
+      audit.mockRejectedValueOnce(new TypeError('Synthetic audit write failure'));
+      const auditFailed = await transfer().expect(503);
+      expect(auditFailed.body.code).toBe('SERVICE_UNAVAILABLE');
       expect(await auditRowsForOrg()).toEqual([]);
       for (let attempt = 0; attempt < 4; attempt += 1) await transfer().expect(422);
       expect(revoke).not.toHaveBeenCalled();
-      revoke.mockRejectedValueOnce(new Error('Synthetic session write failure'));
-      await transfer().expect(500);
+      audit.mockImplementation(async function (this: AuditWriter, ...args) {
+        if (args[0].action === 'auth.session.revoked') {
+          audit.mockImplementation(record);
+          throw new TypeError('Synthetic session write failure');
+        }
+        return record.apply(this, args);
+      });
+      const revokeFailed = await transfer().expect(503);
+      expect(revokeFailed.body.code).toBe('SERVICE_UNAVAILABLE');
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: revokeFailed.body.requestId,
+          errorClass: 'TypeError',
+        }),
+        'HTTP request failed',
+      );
+      const failures = log.mock.calls.filter(([, message]) => message === 'HTTP request failed');
+      expect(JSON.stringify(failures)).not.toContain('Synthetic session write failure');
       await call('get', orgPath, owner.cookie).expect(200);
       expect(await auditRowsForOrg()).toHaveLength(5);
       await transfer().expect(401);
@@ -821,44 +851,107 @@ describe('P5(b) ownership transfer with a wrong current password', () => {
     } finally {
       audit.mockRestore();
       revoke.mockRestore();
+      log.mockRestore();
     }
   }, 30_000);
 
-  it('audits every concurrent failure and revokes at five', async () => {
+  it.each([false, true])(
+    'rejects overlapping re-auth only for the same session (different session: %s)',
+    async (differentSession) => {
+      const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+      const target = await member({ orgId: organizationA, roles: [adminRole] });
+      const other = await app.get(SessionService).create(owner.id, { ip: null, userAgent: null });
+      const entered = deferredSignal();
+      const release = deferredSignal();
+      const verify = vi
+        .spyOn(app.get(PasswordService), 'verify')
+        .mockImplementationOnce(async () => {
+          entered.resolve();
+          await release.promise;
+          return false;
+        });
+      const transfer = (cookie: string) =>
+        call('post', `${orgPath}/ownership-transfer`, cookie)
+          .send({ newOwnerUserId: target.id, currentPassword: 'wrong-concurrent-password' })
+          .timeout({ response: 8_000 });
+      const first = transfer(owner.cookie).then((response) => response);
+      try {
+        await Promise.race([
+          entered.promise,
+          first.then(({ status }) => {
+            throw new Error(`Transfer finished during setup: ${status}`);
+          }),
+        ]);
+        await call('get', '/api/v1/health').expect(200);
+        const second = await transfer(
+          differentSession ? `__Host-session=${other.rawToken}` : owner.cookie,
+        );
+        expect(second.status).toBe(differentSession ? 422 : 429);
+        expect(second.headers['content-type']).toContain('application/problem+json');
+        expect(second.body.code).toBe(differentSession ? 'INVALID_PASSWORD' : 'REAUTH_IN_PROGRESS');
+        expect(verify).toHaveBeenCalledTimes(differentSession ? 2 : 1);
+        expect(await auditRowsForOrg()).toHaveLength(differentSession ? 1 : 0);
+      } finally {
+        release.resolve();
+        verify.mockRestore();
+        await first;
+      }
+      expect((await first).status).toBe(422);
+      expect((await auditRowsForOrg()).map(({ action }) => action)).toEqual(
+        Array(differentSession ? 2 : 1).fill('org.ownership_transfer.denied'),
+      );
+      await call('get', '/api/v1/health').expect(200);
+      expect(await idleInTransaction()).toBe(0);
+    },
+    30_000,
+  );
+
+  it('commits the fifth denial and session revocation before answering 401', async () => {
     const owner = await member({ orgId: organizationA, roles: [ownerRole] });
     const target = await member({ orgId: organizationA, roles: [adminRole] });
-    const service = app.get(PasswordService);
-    const verifyPassword = service.verify.bind(service);
-    let resume!: () => void;
-    const pause = new Promise<void>((resolve) => {
-      resume = resolve;
+    const transfer = () =>
+      call('post', `${orgPath}/ownership-transfer`, owner.cookie)
+        .send({ newOwnerUserId: target.id, currentPassword: 'incorrect' })
+        .timeout({ response: 8_000 });
+    for (let attempt = 0; attempt < 4; attempt += 1) await transfer().expect(422);
+    const revokeStarted = deferredSignal();
+    const release = deferredSignal();
+    const sessions = app.get(SessionService);
+    const revokeSession = sessions.revoke.bind(sessions);
+    const revoke = vi.spyOn(sessions, 'revoke').mockImplementationOnce(async (...args) => {
+      revokeStarted.resolve();
+      await release.promise;
+      return revokeSession(...args);
     });
-    const verify = vi.spyOn(service, 'verify').mockImplementation(async (hash, plain) => {
-      await pause;
-      return verifyPassword(hash, plain);
+    let answered = false;
+    const fifth = transfer().then((response) => {
+      answered = true;
+      return response;
     });
-    const pending = Promise.all(
-      Array.from({ length: 6 }, () =>
-        call('post', `${orgPath}/ownership-transfer`, owner.cookie).send({
-          newOwnerUserId: target.id,
-          currentPassword: 'wrong-concurrent-password',
-        }),
-      ),
-    );
-    void pending.catch(() => undefined);
     try {
-      await vi.waitFor(() => expect(verify).toHaveBeenCalledTimes(6));
+      await Promise.race([
+        revokeStarted.promise,
+        fifth.then(({ status }) => {
+          throw new Error(`Transfer finished before revocation: ${status}`);
+        }),
+      ]);
+      expect(await auditRowsForOrg()).toHaveLength(5);
+      expect(await idleInTransaction()).toBe(0);
+      await transfer().expect(429);
+      await call('get', '/api/v1/auth/me', owner.cookie).expect(200);
+      expect(answered).toBe(false);
     } finally {
-      resume();
-      verify.mockRestore();
-      await pending.catch(() => undefined);
+      release.resolve();
+      revoke.mockRestore();
+      await fifth;
     }
-    const responses = await pending;
-    expect(responses.map(({ status }) => status).sort()).toEqual([401, 401, 422, 422, 422, 422]);
-    expect((await auditRowsForOrg()).map(({ action }) => action)).toEqual(
-      Array(6).fill('org.ownership_transfer.denied'),
+    expect((await fifth).status).toBe(401);
+    expect((await fifth).body.code).toBe('UNAUTHENTICATED');
+    await call('get', '/api/v1/auth/me', owner.cookie).expect(401);
+    const { rows } = await harness.adminPool.query(
+      "SELECT metadata FROM audit_logs WHERE action = 'auth.session.revoked'",
     );
-    await call('get', orgPath, owner.cookie).expect(401);
+    expect(rows).toEqual([{ metadata: { reason: 'reauth_failed' } }]);
   }, 30_000);
 
   it('resets the failure count after a committed transfer', async () => {
@@ -918,6 +1011,124 @@ describe('P5(b) ownership transfer with a wrong current password', () => {
     }
     expect((await first).status).toBe(204);
   }, 30_000);
+});
+
+describe('M1 post-audit tenancy checks', () => {
+  it('returns a 503 problem within one second of the pool acquire timeout', async () => {
+    const { pool } = app.get<DatabaseConnection>(DATABASE);
+    const clients: PoolClient[] = [];
+    try {
+      for (let index = 0; index < 10; index += 1) clients.push(await pool.connect());
+      const timeout = pool.options.connectionTimeoutMillis ?? 5_000;
+      const response = await call('get', '/api/v1/health')
+        .timeout({ response: timeout + 1_000 })
+        .expect(503);
+      expect(response.headers['content-type']).toContain('application/problem+json');
+      expect(response.body.code).toBe('SERVICE_UNAVAILABLE');
+    } finally {
+      for (const client of clients) client.release();
+    }
+    await call('get', '/api/v1/health').expect(200);
+    expect(await idleInTransaction()).toBe(0);
+  }, 30_000);
+
+  it.each<[string, string | null]>([
+    ['Asia/Kolkata', 'Asia/Kolkata'],
+    ['Asia/Calcutta', 'Asia/Kolkata'],
+    ['Mars/Phobos', null],
+    ['+05:30', null],
+    ['-03:00', null],
+    ['Etc/GMT+5', null],
+    ['EST', null],
+    ['EST5EDT', null],
+    ['GMT', null],
+    ['asia/kolkata', 'Asia/Kolkata'],
+    ['Etc/UTC', 'UTC'],
+    ['America/Argentina/Buenos_Aires', 'America/Argentina/Buenos_Aires'],
+  ])('validates and canonicalizes %s for organizations and branches', async (zone, stored) => {
+    const platform = await member({ platform: true });
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const status = stored === null ? 422 : 201;
+    const createdOrg = await call('post', '/api/v1/admin/organizations', platform.cookie)
+      .send({ name: 'Timezone Clinic', slug: 'timezone-clinic', defaultTimezone: zone })
+      .expect(status);
+    const createdBranch = await call('post', `${orgPath}/branches`, owner.cookie)
+      .send({ name: 'Timezone Branch', code: 'TZ', timezone: zone })
+      .expect(status);
+    if (status === 422) {
+      expect(createdOrg.body.code).toBe('INVALID_TIMEZONE');
+      expect(createdBranch.body.code).toBe('INVALID_TIMEZONE');
+      return;
+    }
+    const org = await harness.adminPool.query(
+      'SELECT default_timezone FROM organizations WHERE id = $1',
+      [createdOrg.body.id],
+    );
+    const branch = await harness.adminPool.query('SELECT timezone FROM branches WHERE id = $1', [
+      createdBranch.body.id,
+    ]);
+    expect(org.rows).toEqual([{ default_timezone: stored }]);
+    expect(branch.rows).toEqual([{ timezone: stored }]);
+  });
+
+  it('rejects the invitation after the inviter loses grant authority', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const admin = await member({ orgId: organizationA, roles: [adminRole] });
+    const invitation = await directInvitation({
+      email: 'demoted-inviter-test@clinik.test',
+      ...managerRole,
+      invitedBy: admin.id,
+    });
+    await call('put', `${orgPath}/members/${admin.id}/roles`, owner.cookie)
+      .send({ roles: [doctorA] })
+      .expect(204);
+    const result = await call('post', `${invitation.path}/accept`)
+      .send({ fullName, password })
+      .expect(404);
+    expect(result.body.code).toBe('NOT_FOUND');
+  });
+
+  it('revokes and audits pending invitations when the inviter is removed', async () => {
+    const owner = await member({ orgId: organizationA, roles: [ownerRole] });
+    const admin = await member({ orgId: organizationA, roles: [adminRole] });
+    const invitation = await directInvitation({
+      email: 'removed-inviter-test@clinik.test',
+      ...managerRole,
+      invitedBy: admin.id,
+    });
+    await call('delete', `${orgPath}/members/${admin.id}`, owner.cookie).expect(204);
+    const { rows } = await harness.adminPool.query(
+      'SELECT revoked_at FROM invitations WHERE id = $1',
+      [invitation.id],
+    );
+    expect(rows).toEqual([{ revoked_at: expect.any(Date) }]);
+    const audit = await harness.adminPool.query(
+      'SELECT actor_user_id, metadata FROM audit_logs WHERE action = $1 AND resource_id = $2',
+      ['invitation.revoked', invitation.id],
+    );
+    expect(audit.rows).toEqual([
+      { actor_user_id: owner.id, metadata: { reason: 'inviter_removed' } },
+    ]);
+    const result = await call('post', `${invitation.path}/accept`)
+      .send({ fullName, password })
+      .expect(404);
+    expect(result.body.code).toBe('NOT_FOUND');
+  });
+
+  it('accepts an owner invitation issued by a platform admin with no membership', async () => {
+    const platform = await member({ platform: true });
+    const invitation = await directInvitation({
+      email: 'platform-invitee@clinik.test',
+      ...ownerRole,
+      invitedBy: platform.id,
+    });
+    await call('post', `${invitation.path}/accept`).send({ fullName, password }).expect(204);
+    const { rows } = await harness.adminPool.query(
+      'SELECT role FROM staff_role_assignments WHERE organization_id = $1 AND created_by = $2',
+      [organizationA, platform.id],
+    );
+    expect(rows).toEqual([{ role: 'org_owner' }]);
+  });
 });
 
 describe('invitation and transfer races', () => {
@@ -1085,7 +1296,6 @@ describe('P5(a) invitation listing behaviour', () => {
         role: 'doctor',
         email: 'pending@clinik.test',
         branchId: branchA,
-        invitedBy: owner.id,
         expiresAt: expect.any(String),
         createdAt: expect.any(String),
         status: 'pending',
@@ -1131,7 +1341,7 @@ describe('P5(a) invitation listing behaviour', () => {
     const schema = document.components?.schemas?.InvitationListItemDto;
     expect(schema).toBeDefined();
     expect(schema && 'properties' in schema && Object.keys(schema.properties ?? {}).sort()).toEqual(
-      ['id', 'email', 'role', 'branchId', 'expiresAt', 'invitedBy', 'createdAt', 'status'].sort(),
+      ['id', 'email', 'role', 'branchId', 'expiresAt', 'createdAt', 'status'].sort(),
     );
     const owner = await member({ orgId: organizationA, roles: [ownerRole] });
     const created = await call('post', `${orgPath}/invitations`, owner.cookie)
@@ -1479,8 +1689,18 @@ describe('D25 M1 authorization acceptance', () => {
           user.cookie,
           fixture,
         );
-        if (status === 403) expect(await auditRowsForOrg()).toEqual(before);
-        else expect(await auditRowsForOrg()).toHaveLength(before.length + 1);
+        const after = await auditRowsForOrg();
+        if (status === 403) {
+          expect(after).toEqual(before);
+        } else if (key.startsWith('DELETE ')) {
+          expect(after).toHaveLength(before.length + 2);
+          expect(after.slice(before.length)).toMatchObject([
+            { action: 'invitation.revoked', metadata: { reason: 'inviter_removed' } },
+            { action: 'member.removed' },
+          ]);
+        } else {
+          expect(after).toHaveLength(before.length + 1);
+        }
       }
     },
   );

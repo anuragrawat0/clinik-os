@@ -9,7 +9,7 @@ import { sessionEndedPath } from '@/lib/api-client/problems';
 import type { components } from '@/lib/api-client/schema';
 import { organizationNavigation } from './permissions';
 import { useLogout, useMe } from './session';
-import { LoadError, Notice, Unavailable } from './ui';
+import { LoadError, Notice, Unavailable, useSingleFlightSubmit } from './ui';
 
 type Account = components['schemas']['MeResponseDto'];
 type Membership = Account['memberships'][number];
@@ -30,6 +30,7 @@ export function useClinic() {
 function WorkspaceHeader({ account, selected }: { account: Account; selected?: string }) {
   const router = useRouter();
   const logout = useLogout();
+  const runSubmit = useSingleFlightSubmit();
   return (
     <header className="m1-top">
       <Link className="brand" href="/app">
@@ -69,7 +70,7 @@ function WorkspaceHeader({ account, selected }: { account: Account; selected?: s
               type="button"
               tone="quiet"
               disabled={logout.isPending}
-              onClick={() => logout.mutate()}
+              onClick={() => void runSubmit(() => logout.mutateAsync())}
             >
               Sign out
             </Button>
