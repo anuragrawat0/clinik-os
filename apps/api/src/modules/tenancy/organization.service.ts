@@ -46,7 +46,7 @@ export function recordMutation(
   audit: AuditWriter,
   actor: OrganizationActor,
   meta: RequestMeta,
-  event: Pick<AuditEvent, 'action' | 'resourceType' | 'resourceId' | 'changedFields'>,
+  event: Pick<AuditEvent, 'action' | 'resourceType' | 'resourceId' | 'changedFields' | 'metadata'>,
 ): Promise<void> {
   return audit.record(
     {
@@ -81,10 +81,9 @@ export class OrganizationService {
     input: { name: string; slug: string; defaultTimezone: string },
     meta: RequestMeta,
   ) {
-    validateTimezone(input.defaultTimezone);
     const [org] = await tx
       .insert(organizations)
-      .values(input)
+      .values({ ...input, defaultTimezone: validateTimezone(input.defaultTimezone) })
       .returning()
       .catch((error: unknown) => {
         if (isUniqueViolation(error, 'organizations_slug_key'))
@@ -148,10 +147,13 @@ export class OrganizationService {
     input: z.output<typeof updateOrganizationInput> | { status: 'active' | 'suspended' },
     meta: RequestMeta,
   ) {
-    if ('defaultTimezone' in input) validateTimezone(input.defaultTimezone);
+    const values =
+      'defaultTimezone' in input && input.defaultTimezone !== undefined
+        ? { ...input, defaultTimezone: validateTimezone(input.defaultTimezone) }
+        : input;
     const [updated] = await actor.tx
       .update(organizations)
-      .set(input)
+      .set(values)
       .where(eq(organizations.id, actor.orgId))
       .returning();
     if (!updated) notFound();
@@ -196,10 +198,9 @@ export class OrganizationService {
     input: z.output<typeof createBranchInput>,
     meta: RequestMeta,
   ) {
-    validateTimezone(input.timezone);
     const [branch] = await actor.tx
       .insert(branches)
-      .values({ ...input, organizationId: actor.orgId })
+      .values({ ...input, timezone: validateTimezone(input.timezone), organizationId: actor.orgId })
       .returning()
       .catch(branchConflict);
     await recordMutation(this.audit, actor, meta, {
@@ -220,10 +221,13 @@ export class OrganizationService {
     await this.getBranch(actor, branchId);
     if (!coversBranch(actor, 'branch.update', branchId)) forbidden();
     if (input.status !== undefined && !coversBranch(actor, 'branch.manage', branchId)) forbidden();
-    validateTimezone(input.timezone);
+    const values =
+      input.timezone === undefined
+        ? input
+        : { ...input, timezone: validateTimezone(input.timezone) };
     const [branch] = await actor.tx
       .update(branches)
-      .set(input)
+      .set(values)
       .where(and(eq(branches.organizationId, actor.orgId), eq(branches.id, branchId)))
       .returning()
       .catch(branchConflict);

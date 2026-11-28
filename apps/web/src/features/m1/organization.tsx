@@ -11,7 +11,16 @@ import { clinicKey, clinicParams, useBranches, useMembers } from './clinic-data'
 import { hasPermission, organizationNavigation, roleLabel } from './permissions';
 import { meKey } from './session';
 import { clinicPath, useClinic } from './shell';
-import { FormDialog, Heading, LoadError, Notice, Timezone, Unavailable, textField } from './ui';
+import {
+  FormDialog,
+  Heading,
+  LoadError,
+  Notice,
+  Timezone,
+  Unavailable,
+  textField,
+  useSingleFlightSubmit,
+} from './ui';
 
 export function Dashboard() {
   const { membership, roles } = useClinic();
@@ -71,6 +80,7 @@ function Settings() {
   const cache = useQueryClient();
   const [transfer, setTransfer] = useState(false);
   const [transferred, setTransferred] = useState(false);
+  const runSubmit = useSingleFlightSubmit();
   const canTransfer = hasPermission(roles, 'org.ownership.transfer');
   const members = useMembers(orgId, canTransfer);
   const org = useQuery({
@@ -113,7 +123,7 @@ function Settings() {
             key={org.data.updatedAt}
             onSubmit={(event) => {
               event.preventDefault();
-              save.mutate(new FormData(event.currentTarget));
+              void runSubmit(() => save.mutateAsync(new FormData(event.currentTarget)));
             }}
           >
             <fieldset disabled={save.isPending}>

@@ -614,8 +614,6 @@ export interface components {
             branchId: string | null;
             /** Format: date-time */
             expiresAt: string;
-            /** Format: uuid */
-            invitedBy: string;
             /** Format: date-time */
             createdAt: string;
             /** @enum {string} */
@@ -1637,6 +1635,20 @@ export interface operations {
             };
             /** @description Current password is incorrect */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Reauthentication is already in progress for this session */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database connection or denial processing unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

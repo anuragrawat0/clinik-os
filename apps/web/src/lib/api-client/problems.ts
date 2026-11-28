@@ -9,6 +9,7 @@ const messages: Readonly<Record<string, string>> = {
   BRANCH_CODE_TAKEN: 'That branch code is already in use in this clinic.',
   INVALID_TIMEZONE: 'Choose a supported time zone.',
   INVALID_PASSWORD: 'The current password is incorrect.',
+  INVALID_TOKEN: 'This link has expired or was already used. Request a new one.',
   INVALID_CREDENTIALS: 'Unable to sign in. Check your email and password.',
   SELF_GRANT_FORBIDDEN: 'You cannot change your own roles.',
   EMPTY_ROLES: 'Keep at least one role or use Remove to remove this member from the clinic.',

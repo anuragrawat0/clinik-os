@@ -7,12 +7,14 @@ import { useState, type FormEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import { apiClient } from '@/lib/api-client/client';
 import { checkResponse, displayError, responseData } from '@/lib/api-client/problems';
+import { useSingleFlightSubmit } from '@/lib/use-single-flight-submit';
 import { useHydrated } from './use-hydrated';
 
 export function InvitationForm({ token }: { token: string }) {
   const router = useRouter();
   const cache = useQueryClient();
   const hydrated = useHydrated();
+  const runSubmit = useSingleFlightSubmit();
   const [mode, setMode] = useState<'new' | 'existing'>('new');
   const params = { path: { token } };
   const preview = useQuery({
@@ -53,7 +55,7 @@ export function InvitationForm({ token }: { token: string }) {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!hydrated || busy) return;
-    accept.mutate(new FormData(event.currentTarget));
+    void runSubmit(() => accept.mutateAsync(new FormData(event.currentTarget)));
   }
 
   return (
@@ -140,8 +142,8 @@ export function InvitationForm({ token }: { token: string }) {
               <Button
                 type="button"
                 tone="quiet"
-                disabled={busy}
-                onClick={() => accept.mutate(undefined)}
+                disabled={!hydrated || busy}
+                onClick={() => void runSubmit(() => accept.mutateAsync(undefined))}
               >
                 Accept with my current session
               </Button>

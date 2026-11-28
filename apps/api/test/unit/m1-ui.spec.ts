@@ -1,5 +1,13 @@
-import type { RoleScope } from '@clinik/shared';
+import {
+  canonicalTimeZone,
+  displayName,
+  isValidTimeZone,
+  normalizeTimeZone,
+  timeZoneOptions,
+  type RoleScope,
+} from '@clinik/shared';
 import { describe, expect, it } from 'vitest';
+import nextConfig from '../../../web/next.config';
 import {
   canEditRoles,
   canManageBranch,
@@ -24,6 +32,99 @@ const branches = [
   { id: 'B', status: 'active' },
   { id: 'C', status: 'inactive' },
 ];
+
+describe('shared time zones', () => {
+  it.each([
+    ['Asia/Calcutta', 'Asia/Kolkata'],
+    ['Europe/Kiev', 'Europe/Kyiv'],
+    ['Asia/Saigon', 'Asia/Ho_Chi_Minh'],
+    ['Asia/Katmandu', 'Asia/Kathmandu'],
+    ['Asia/Rangoon', 'Asia/Yangon'],
+    ['America/Buenos_Aires', 'America/Argentina/Buenos_Aires'],
+    ['Etc/UTC', 'UTC'],
+    ['Etc/GMT', 'UTC'],
+  ])('recognizes %s and canonicalizes it to %s', (alias, canonical) => {
+    expect(isValidTimeZone(alias)).toBe(true);
+    expect(isValidTimeZone(canonical)).toBe(true);
+    expect(canonicalTimeZone(alias)).toBe(canonical);
+    expect(canonicalTimeZone(canonical)).toBe(canonical);
+  });
+
+  it('offers sorted, unique canonical options including UTC', () => {
+    const options = timeZoneOptions();
+    expect(options).toEqual([...new Set(options)].sort());
+    expect(options).toContain('Asia/Kolkata');
+    expect(options).toContain('UTC');
+    expect(options).not.toContain('Asia/Calcutta');
+    expect(isValidTimeZone('Mars/Phobos')).toBe(false);
+    expect(options.map(normalizeTimeZone)).toEqual(options);
+  });
+
+  it.each(['+05:30', '-03:00', 'Etc/GMT+5', 'EST', 'EST5EDT', 'GMT', 'Mars/Phobos'])(
+    'rejects %s as an unsupported time zone',
+    (value) => {
+      expect(normalizeTimeZone(value)).toBeUndefined();
+      expect(isValidTimeZone(value)).toBe(false);
+      expect(timeZoneOptions()).not.toContain(value);
+    },
+  );
+
+  it.each([
+    ['asia/kolkata', 'Asia/Kolkata'],
+    ['Etc/UTC', 'UTC'],
+    ['utc', 'UTC'],
+    ['America/Argentina/Buenos_Aires', 'America/Argentina/Buenos_Aires'],
+  ])('normalizes %s to the supported zone %s', (input, stored) => {
+    expect(normalizeTimeZone(input)).toBe(stored);
+    expect(timeZoneOptions()).toContain(stored);
+  });
+});
+
+describe('shared display names', () => {
+  it('normalizes and trims names while preserving a joiner inside a visible name', () => {
+    expect(displayName.parse(' Cafe\u0301 ')).toBe('Café');
+    expect(displayName.parse('👩‍⚕️')).toBe('👩‍⚕️');
+    expect(displayName.safeParse(' \u200d ').success).toBe(false);
+    expect(displayName.safeParse('Clinic\n').success).toBe(false);
+  });
+});
+
+describe('Next response header configuration', () => {
+  it.each([
+    ['/login', 'same-origin'],
+    ['/app', 'same-origin'],
+    ['/invite/token', 'no-referrer'],
+    ['/reset-password', 'no-referrer'],
+    ['/verify-email', 'no-referrer'],
+  ])('sets the production headers for %s', async (path, referrer) => {
+    const config = nextConfig('phase-production-build');
+    const rules = (await config.headers?.()) ?? [];
+    const headers = Object.fromEntries(
+      rules
+        .filter(
+          ({ source }) =>
+            source === path || (source.endsWith('/:path*') && path.startsWith(source.slice(0, -6))),
+        )
+        .flatMap((rule) => rule.headers.map(({ key, value }) => [key, value])),
+    );
+    expect(config.poweredByHeader).toBe(false);
+    expect(headers).toEqual({
+      'Content-Security-Policy':
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+      'X-Frame-Options': 'DENY',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': referrer,
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    });
+  });
+
+  it('allows unsafe-eval only in the Next development phase', async () => {
+    const development = await nextConfig('phase-development-server').headers?.();
+    const production = await nextConfig('phase-production-server').headers?.();
+    expect(development?.[0].headers[0].value).toContain(" 'unsafe-eval'");
+    expect(production?.[0].headers[0].value).not.toContain(" 'unsafe-eval'");
+  });
+});
 
 describe('M1 clinic navigation', () => {
   it.each([
@@ -130,6 +231,7 @@ describe('problem details display', () => {
     ['BRANCH_CODE_TAKEN', 'branch code'],
     ['INVALID_TIMEZONE', 'time zone'],
     ['INVALID_PASSWORD', 'password is incorrect'],
+    ['INVALID_TOKEN', 'This link has expired or was already used. Request a new one.'],
     ['SELF_GRANT_FORBIDDEN', 'your own roles'],
     ['EMPTY_ROLES', 'Keep at least one role'],
     ['RATE_LIMITED', 'Too many attempts'],

@@ -1,15 +1,40 @@
-import type { INestApplication } from '@nestjs/common';
+import type {
+  CallHandler,
+  ExecutionContext,
+  INestApplication,
+  NestInterceptor,
+} from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { OpenAPIObject } from '@nestjs/swagger';
+import type { Express, Request, RequestHandler, Response } from 'express';
 import pinoHttp from 'pino-http';
 import { SESSION_COOKIE_NAME } from './core/auth/session-cookie';
-import { ProblemDetailsFilter } from './core/errors/problem-details.filter';
+import { loadSwaggerEnabled } from './core/config/config';
+import { ProblemDetailsFilter, setApiCachePolicy } from './core/errors/problem-details.filter';
 import { createRequestId } from './core/logging/http-request-id';
 import { logger } from './core/logging/logger';
 
+class ApiCacheInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler) {
+    const http = context.switchToHttp();
+    setApiCachePolicy(http.getRequest<Request>().path, http.getResponse<Response>());
+    return next.handle();
+  }
+}
+
+const contentTypePolicy: RequestHandler = (_request, response, next) => {
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+};
+
 export function configureHttpApp(app: INestApplication): OpenAPIObject {
+  const express = app.getHttpAdapter().getInstance() as Express;
+  express.disable('x-powered-by');
+  express.set('etag', false);
   app.setGlobalPrefix('api/v1');
   app.useGlobalFilters(new ProblemDetailsFilter());
+  app.useGlobalInterceptors(new ApiCacheInterceptor());
+  app.use(contentTypePolicy);
   app.use(
     pinoHttp({
       logger,
@@ -37,7 +62,7 @@ export function configureHttpApp(app: INestApplication): OpenAPIObject {
     .addCookieAuth(SESSION_COOKIE_NAME)
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
-  if (process.env.NODE_ENV !== 'production') {
+  if (loadSwaggerEnabled()) {
     SwaggerModule.setup('api/docs', app, document);
   }
   return document;

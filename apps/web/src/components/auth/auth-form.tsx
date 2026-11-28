@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { apiClient } from '@/lib/api-client/client';
 import { checkResponse, displayError, problemMessage } from '@/lib/api-client/problems';
+import { useSingleFlightSubmit } from '@/lib/use-single-flight-submit';
 import { useHydrated } from './use-hydrated';
 
 type FormMode = 'login' | 'forgot' | 'reset';
@@ -25,6 +26,7 @@ export function AuthForm({
   const router = useRouter();
   const cache = useQueryClient();
   const hydrated = useHydrated();
+  const runSubmit = useSingleFlightSubmit();
   const [complete, setComplete] = useState(false);
   const task = useMutation({
     gcTime: 0,
@@ -73,7 +75,7 @@ export function AuthForm({
           onSubmit={(event) => {
             event.preventDefault();
             if (!hydrated || task.isPending) return;
-            task.mutate(new FormData(event.currentTarget));
+            void runSubmit(() => task.mutateAsync(new FormData(event.currentTarget)));
           }}
         >
           {mode !== 'reset' && (

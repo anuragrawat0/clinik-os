@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadApiConfig, loadWorkerConfig } from '../../src/core/config/config';
+import { loadApiConfig, loadSwaggerEnabled, loadWorkerConfig } from '../../src/core/config/config';
 
 describe('environment configuration', () => {
   it('requires a valid API database URL', () => {
@@ -34,5 +34,47 @@ describe('environment configuration', () => {
     ]) {
       expect(() => loadApiConfig({ ...env, ...entry })).toThrow();
     }
+  });
+
+  it('defaults and validates both runtime database timeout configurations', () => {
+    const api = { DATABASE_URL: 'postgresql://clinic_app:dev@db/clinik' };
+    const worker = { WORKER_DATABASE_URL: 'postgresql://clinic_worker:dev@db/clinik' };
+    const defaults = {
+      DB_POOL_ACQUIRE_TIMEOUT_MS: 5_000,
+      DB_STATEMENT_TIMEOUT_MS: 10_000,
+      DB_IDLE_IN_TX_TIMEOUT_MS: 15_000,
+    };
+    expect(loadApiConfig(api)).toMatchObject(defaults);
+    expect(loadWorkerConfig(worker)).toMatchObject(defaults);
+    for (const key of Object.keys(defaults)) {
+      expect(() => loadApiConfig({ ...api, [key]: '0' })).toThrow();
+      expect(() => loadWorkerConfig({ ...worker, [key]: '5.5' })).toThrow();
+      expect(loadApiConfig({ ...api, [key]: '100' })).toMatchObject({ [key]: 100 });
+    }
+  });
+
+  it('defaults Swagger to disabled', () => {
+    const env = { DATABASE_URL: 'postgresql://clinic_app:dev@db/clinik' };
+    expect(loadApiConfig(env).ENABLE_SWAGGER).toBe(false);
+    expect(loadSwaggerEnabled(env)).toBe(false);
+  });
+
+  it.each([
+    ['true', true],
+    ['false', false],
+    ['1', true],
+    ['0', false],
+    ['TrUe', true],
+    ['FaLsE', false],
+  ])('parses ENABLE_SWAGGER=%s as %s', (value, expected) => {
+    const env = { DATABASE_URL: 'postgresql://clinic_app:dev@db/clinik', ENABLE_SWAGGER: value };
+    expect(loadApiConfig(env).ENABLE_SWAGGER).toBe(expected);
+    expect(loadSwaggerEnabled(env)).toBe(expected);
+  });
+
+  it.each(['', '2', 'yes', ' true '])('rejects unsupported ENABLE_SWAGGER=%j', (value) => {
+    const env = { DATABASE_URL: 'postgresql://clinic_app:dev@db/clinik', ENABLE_SWAGGER: value };
+    expect(() => loadApiConfig(env)).toThrow();
+    expect(() => loadSwaggerEnabled(env)).toThrow();
   });
 });

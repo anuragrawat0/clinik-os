@@ -12,7 +12,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "pnpm --filter @clinik/shared build && pnpm -r --if-present typecheck",
-    "test": "pnpm --filter @clinik/api test",
+    "test": "pnpm --filter @clinik/api test && pnpm --filter @clinik/web test",
     "db:migrate": "pnpm --filter @clinik/api db:migrate",
     "db:rollback": "pnpm --filter @clinik/api db:rollback",
     "admin:create": "node apps/api/dist/cli/create-admin.js",

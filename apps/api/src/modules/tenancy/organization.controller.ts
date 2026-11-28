@@ -286,6 +286,11 @@ export class OrganizationController {
     description: 'Session unavailable or revoked after failed reauthentication',
   })
   @ApiResponse({ status: 422, description: 'Current password is incorrect' })
+  @ApiResponse({
+    status: 429,
+    description: 'Reauthentication is already in progress for this session',
+  })
+  @ApiResponse({ status: 503, description: 'Database connection or denial processing unavailable' })
   transferOwnership(
     @CurrentTenant() tenant: TenantOperation,
     @CurrentAuth() auth: SessionContext,

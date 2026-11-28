@@ -38,7 +38,7 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Test
+      - name: Test API and web
         run: pnpm test
 
       - name: Check dependency boundaries
@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 15
 
     env:
-      COMPOSE_PROJECT_NAME: clinik-os-smoke
+      COMPOSE_PROJECT_NAME: clinik-smoke
 
     steps:
       - uses: actions/checkout@v4
@@ -153,8 +153,8 @@ jobs:
           corepack enable
           pnpm install --filter clinik-os --frozen-lockfile
           pnpm exec playwright install --with-deps chromium
-          pnpm exec playwright test apps/web/test/auth-form-security.spec.ts --workers=1
           node scripts/wf1-compose-smoke.mjs
+          pnpm exec playwright test apps/web/test/auth-form-security.spec.ts apps/web/test/audit/security-headers.spec.ts --workers=1
 
       - name: Upload WF-1 failure artifacts
         if: failure()

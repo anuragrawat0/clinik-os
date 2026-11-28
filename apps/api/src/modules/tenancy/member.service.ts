@@ -6,11 +6,12 @@ import {
   type StaffRole,
 } from '@clinik/shared';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull } from 'drizzle-orm';
 import { coversBranch, forbidden } from '../../core/access/access';
 import { AuditWriter } from '../../core/audit';
 import { CLOCK, type Clock } from '../../core/clock/clock';
 import {
+  invitations,
   organizationMembers,
   sessions,
   staffRoleAssignments,
@@ -51,7 +52,7 @@ function canRemoveMember(
 @Injectable()
 export class MemberService {
   private readonly reauthFailures = new Map<string, { count: number }>();
-  private readonly pendingReauthDenials = new Map<string, Promise<void>>();
+  private readonly reauthInProgress = new Set<string>();
 
   constructor(
     @Inject(AuditWriter) private readonly audit: AuditWriter,
@@ -215,6 +216,29 @@ export class MemberService {
         ),
       );
     await this.sessions.revokeAllForUser(userId, {}, tx);
+    const now = this.clock.now();
+    const revokedInvitations = await tx
+      .update(invitations)
+      .set({ revokedAt: now })
+      .where(
+        and(
+          eq(invitations.organizationId, orgId),
+          eq(invitations.invitedBy, userId),
+          isNull(invitations.acceptedAt),
+          isNull(invitations.revokedAt),
+          gt(invitations.expiresAt, now),
+        ),
+      )
+      .returning({ id: invitations.id });
+    for (const invitation of revokedInvitations) {
+      await recordMutation(this.audit, locked, meta, {
+        action: 'invitation.revoked',
+        resourceType: 'invitation',
+        resourceId: invitation.id,
+        changedFields: ['revokedAt'],
+        metadata: { reason: 'inviter_removed' },
+      });
+    }
     await recordMutation(this.audit, actor, meta, {
       action: 'member.removed',
       resourceType: 'organization_member',
@@ -230,6 +254,22 @@ export class MemberService {
     meta: RequestMeta,
   ): Promise<void> {
     const { orgId, userId, tx } = actor;
+    if (this.reauthInProgress.has(sessionId))
+      throw new HttpException({ code: 'REAUTH_IN_PROGRESS' }, 429);
+    this.reauthInProgress.add(sessionId);
+    let afterDenial: (() => Promise<void>) | undefined;
+    actor.afterCommit(async () => {
+      this.reauthFailures.delete(sessionId);
+      this.reauthInProgress.delete(sessionId);
+    });
+    actor.afterRollback(async () => {
+      try {
+        await afterDenial?.();
+      } finally {
+        this.reauthInProgress.delete(sessionId);
+      }
+    });
+
     if (newOwnerUserId === userId) selfGrant();
     await this.organization.activeMemberRoles(actor, newOwnerUserId);
     const userQuery = tx
@@ -238,7 +278,10 @@ export class MemberService {
       .where(and(eq(users.id, userId), eq(users.status, 'active')));
     const [user] = await userQuery;
     if (!user?.passwordHash || !(await this.passwords.verify(user.passwordHash, currentPassword))) {
-      return this.denyOwnershipTransfer(actor, sessionId, meta);
+      const remainingMs = await this.reauthSessionTimeLeft(actor, sessionId);
+      afterDenial = () =>
+        this.recordOwnershipTransferDenial(orgId, userId, sessionId, remainingMs, meta);
+      throw new HttpException({ code: 'INVALID_PASSWORD' }, 422);
     }
 
     const locked = await this.organization.lockForMember(actor, 'org.ownership.transfer');
@@ -248,8 +291,6 @@ export class MemberService {
       throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
     if ((await this.reauthSessionTimeLeft(actor, sessionId, true)) === null)
       throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
-    const priorFailures = this.reauthFailures.get(sessionId);
-
     const assignment = (assignee: string, role: StaffRole) =>
       and(
         eq(staffRoleAssignments.organizationId, orgId),
@@ -279,10 +320,6 @@ export class MemberService {
       resourceId: orgId,
       changedFields: ['roles'],
     });
-    actor.afterCommit(async () => {
-      if (this.reauthFailures.get(sessionId) === priorFailures)
-        this.reauthFailures.delete(sessionId);
-    });
   }
 
   private async reauthSessionTimeLeft(
@@ -305,53 +342,49 @@ export class MemberService {
     return session.absoluteExpiresAt.getTime() - now.getTime();
   }
 
-  private async denyOwnershipTransfer(
-    actor: TenantOperation,
+  private async recordOwnershipTransferDenial(
+    orgId: string,
+    userId: string,
     sessionId: string,
+    remainingMs: number | null,
     meta: RequestMeta,
-  ): Promise<never> {
-    // Serialize denials in memory because revocation takes the row lock in its own transaction.
-    const previous = this.pendingReauthDenials.get(sessionId);
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.pendingReauthDenials.set(sessionId, current);
+  ): Promise<void> {
     try {
-      await previous;
-      const remainingMs = await this.reauthSessionTimeLeft(actor, sessionId);
       await this.audit.record({
         ...meta,
         action: 'org.ownership_transfer.denied',
         outcome: 'denied',
-        organizationId: actor.orgId,
-        actorUserId: actor.userId,
+        organizationId: orgId,
+        actorUserId: userId,
         resourceType: 'organization',
-        resourceId: actor.orgId,
+        resourceId: orgId,
       });
       if (remainingMs === null) {
         this.reauthFailures.delete(sessionId);
-        throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
+        return;
       }
       const prior = this.reauthFailures.get(sessionId);
-      const count = (prior?.count ?? 0) + 1;
-      if (count >= reauthFailureLimit) {
-        await this.sessions.revoke(sessionId, {
-          userId: actor.userId,
-          actorUserId: actor.userId,
-          reason: 'reauth_failed',
-          meta,
-        });
-        this.reauthFailures.delete(sessionId);
-        throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
+      const failures = prior ?? { count: 0 };
+      failures.count++;
+      if (!prior) {
+        this.reauthFailures.set(sessionId, failures);
+        setTimeout(() => {
+          if (this.reauthFailures.get(sessionId) === failures)
+            this.reauthFailures.delete(sessionId);
+        }, remainingMs).unref();
       }
-      this.reauthFailures.set(sessionId, { count });
-      if (!prior) setTimeout(() => this.reauthFailures.delete(sessionId), remainingMs).unref();
-      throw new HttpException({ code: 'INVALID_PASSWORD' }, 422);
-    } finally {
-      if (this.pendingReauthDenials.get(sessionId) === current)
-        this.pendingReauthDenials.delete(sessionId);
-      release();
+      if (failures.count < reauthFailureLimit) return;
+
+      await this.sessions.revoke(sessionId, {
+        userId,
+        actorUserId: userId,
+        reason: 'reauth_failed',
+        meta,
+      });
+      this.reauthFailures.delete(sessionId);
+    } catch (cause) {
+      throw new HttpException({ code: 'SERVICE_UNAVAILABLE' }, 503, { cause });
     }
+    throw new HttpException({ code: 'UNAUTHENTICATED' }, 401);
   }
 }

@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { createTransport, type SendMailOptions } from 'nodemailer';
 import type { ApiConfig } from '../../core/config/config';
 import { logger } from '../../core/logging/logger';
+import { errorClass, errorCode } from '../../core/logging/startup-failure';
 
 export const AUTH_MAIL_TRANSPORT = Symbol('AUTH_MAIL_TRANSPORT');
 export const AUTH_MAIL_CONFIG = Symbol('AUTH_MAIL_CONFIG');
@@ -39,6 +40,25 @@ const templates = {
   },
 } as const;
 
+function logDeliveryFailure(error: unknown): void {
+  const responseCode =
+    error instanceof Error && 'responseCode' in error ? error.responseCode : undefined;
+  logger.warn(
+    {
+      errorClass: errorClass(error),
+      systemCode: errorCode(error),
+      responseCode:
+        typeof responseCode === 'number' &&
+        Number.isInteger(responseCode) &&
+        responseCode >= 100 &&
+        responseCode <= 599
+          ? responseCode
+          : undefined,
+    },
+    'An authentication email could not be sent.',
+  );
+}
+
 @Injectable()
 export class AuthMailer {
   constructor(
@@ -58,8 +78,8 @@ export class AuthMailer {
       const url = new URL(template.path, this.config.APP_BASE_URL);
       url.searchParams.set('token', rawToken);
       await this.deliver(to, '', template.subject, template.message, url);
-    } catch {
-      logger.warn('An authentication email could not be sent.');
+    } catch (error) {
+      logDeliveryFailure(error);
     }
   }
 
@@ -77,8 +97,8 @@ export class AuthMailer {
         new URL(`/invite/${token}`, this.config.APP_BASE_URL),
       );
       return 'sent';
-    } catch {
-      logger.warn('An authentication email could not be sent.');
+    } catch (error) {
+      logDeliveryFailure(error);
       return 'failed';
     }
   }
